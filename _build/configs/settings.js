@@ -1,0 +1,52 @@
+export default {
+    // Цены моделей для подсчёта стоимости в логе: $ за млн токенов.
+    // Нет модели в списке — в лог пишется 0, но токены остаются.
+    'prices': {
+        xtype: 'textarea',
+        value: '{"claude-opus-5-5":{"in":10,"out":50},"claude-opus-5":{"in":5,"out":25},"claude-sonnet-5":{"in":2,"out":10}}',
+        area: 'gtsai_main',
+    },
+    // Страница «Чат ИИ» в разделе Администратор (resources.js) и пункт меню
+    // менеджера ссылаются на одну и ту же настройку: приложение одно.
+    'p_chat': {
+        xtype: 'textarea',
+        value: '{"mixVue":{"app":"gtsai","config":{"setting":"admin","dock":"inline"}}}',
+        area: 'gtsai_main',
+    },
+
+    // --- Доступ к базе только на чтение ---------------------------------
+    //
+    // ⚠️ Это ОТДЕЛЬНЫЙ пользователь MySQL с правом SELECT, а НЕ коннект MODX.
+    // Как его завести — в README.md пакета. Пусто — инструмент SQL не работает,
+    // даже если он разрешён в настройке чата.
+    'sql_dsn': {
+        xtype: 'textfield',
+        value: '',
+        area: 'gtsai_sql',
+    },
+    'sql_user': {
+        xtype: 'textfield',
+        value: '',
+        area: 'gtsai_sql',
+    },
+    'sql_password': {
+        xtype: 'text-password',
+        value: '',
+        area: 'gtsai_sql',
+    },
+    // Таблицы, которые не показываем никогда, даже на чтение.
+    'sql_deny': {
+        xtype: 'textfield',
+        value: 'modx_users,modx_user_attributes,gtsapi_tokens',
+        area: 'gtsai_sql',
+    },
+
+    // Страница админки: что показать в пункте меню gtsAI.
+    // JSON здесь, а не в params пункта меню: меню менеджера рендерится через
+    // Smarty, и фигурные скобки в params ломают страницу менеджера.
+    'admin': {
+        xtype: 'textarea',
+        value: '{"mixVue":{"app":"gtsai","config":{"setting":"default","echo":true,"dock":"inline"}},"PVTabs":{"tabs":{"gtsAIConn":{"title":"Подключения","table":"gtsAIConn"},"gtsAISetting":{"title":"Настройки чатов","table":"gtsAISetting"},"gtsAIChat":{"title":"Чаты","table":"gtsAIChat"},"gtsAILog":{"title":"Лог вызовов","table":"gtsAILog"}}}}',
+        area: 'gtsai_main',
+    },
+}

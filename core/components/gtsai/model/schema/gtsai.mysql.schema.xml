@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model package="gtsai" baseClass="xPDOObject" platform="mysql" defaultEngine="InnoDB" phpgtsai-package="gtsai"
+       version="1.1">
+
+    <!-- Подключение к ИИ: адрес шлюза, ключ, протокол. Ключ держим здесь, а НЕ
+         в системных настройках MODX: настройки видны любому админу в менеджере
+         и уезжают при db_pull через gtsDeploy (ключ прода оказался бы на деве). -->
+    <object class="gtsAIConn" table="gtsai_conns" extends="xPDOSimpleObject">
+        <field key="name" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="protocol" dbtype="varchar" precision="20" phptype="string" null="false" default="anthropic"/>
+        <field key="base_url" dbtype="varchar" precision="255" phptype="string" null="false" default=""/>
+        <field key="api_key" dbtype="varchar" precision="255" phptype="string" null="false" default=""/>
+        <field key="model" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="active" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="comment" dbtype="text" phptype="string" null="true"/>
+        <index alias="name" name="name" primary="false" unique="true" type="BTREE">
+            <column key="name" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <!-- Имя настроек виджета: то, что передаётся при вызове mixVue. Промпт,
+         права и разрешения живут здесь, а не в коде страницы. -->
+    <object class="gtsAISetting" table="gtsai_settings" extends="xPDOSimpleObject">
+        <field key="name" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="title" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="active" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="conn_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="true" default="0"/>
+        <field key="model" dbtype="varchar" precision="191" phptype="string" null="true" default=""/>
+        <field key="prompt" dbtype="mediumtext" phptype="string" null="true"/>
+        <field key="groups" dbtype="varchar" precision="255" phptype="string" null="true" default=""/>
+        <field key="allow_gtsapi" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="allow_sql" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- Рубильник уровня чата: разрешены ли ему пишущие действия вообще.
+             ЧТО именно можно — решает конфиг таблицы (actions: { update:
+             {'ai': 1} }), здесь только общий запрет на запись для чата. -->
+        <field key="allow_write" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- confirm_write: показать дифф было/стало и ждать кнопку Применить.
+             По умолчанию включено, выключается только для доверенных настроек. -->
+        <field key="confirm_write" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <!-- Запретить человеку выключать подтверждение в самом чате. Нужен там,
+             где правки важные: иначе переключатель в чате сильнее настройки. -->
+        <field key="confirm_lock" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="save_history" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="max_iterations" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="10"/>
+        <field key="max_seconds" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="120"/>
+        <field key="day_limit" dbtype="decimal" precision="12,2" phptype="float" null="false" default="0"/>
+        <index alias="name" name="name" primary="false" unique="true" type="BTREE">
+            <column key="name" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <object class="gtsAIChat" table="gtsai_chats" extends="xPDOSimpleObject">
+        <field key="user_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="setting" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="title" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="page_url" dbtype="varchar" precision="255" phptype="string" null="true" default=""/>
+        <field key="deleted" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="createdon" dbtype="datetime" phptype="datetime" null="true"/>
+        <field key="updatedon" dbtype="datetime" phptype="datetime" null="true"/>
+        <index alias="user_id" name="user_id" primary="false" unique="false" type="BTREE">
+            <column key="user_id" length="" collation="A" null="false"/>
+        </index>
+        <index alias="setting" name="setting" primary="false" unique="false" type="BTREE">
+            <column key="setting" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <object class="gtsAIMessage" table="gtsai_messages" extends="xPDOSimpleObject">
+        <field key="chat_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="role" dbtype="varchar" precision="20" phptype="string" null="false" default="user"/>
+        <field key="content" dbtype="mediumtext" phptype="string" null="true"/>
+        <!-- blocks: сырые content-блоки ответа (text/thinking/tool_use/tool_result).
+             Нужны, чтобы историю можно было переслать провайдеру как есть. -->
+        <field key="blocks" dbtype="mediumtext" phptype="string" null="true"/>
+        <field key="tokens_in" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="tokens_out" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- batch_id: сцепка правок одного ответа ИИ. Тот же id уходит в gtsAPILog,
+             по нему делается откат всего жеста одной кнопкой. -->
+        <field key="batch_id" dbtype="varchar" precision="40" phptype="string" null="true" default=""/>
+        <field key="createdon" dbtype="datetime" phptype="datetime" null="true"/>
+        <index alias="chat_id" name="chat_id" primary="false" unique="false" type="BTREE">
+            <column key="chat_id" length="" collation="A" null="false"/>
+        </index>
+        <index alias="batch_id" name="batch_id" primary="false" unique="false" type="BTREE">
+            <column key="batch_id" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <!-- Файлы и снимки из чата. Лежат в медиа-источнике, в сообщении ссылка.
+         Хранить обязательно: при продолжении диалога историю надо переслать
+         целиком, а картинка в Messages API это сам контент, не ссылка,
+         без файла старый чат с картинкой продолжить нельзя. -->
+    <object class="gtsAIFile" table="gtsai_files" extends="xPDOSimpleObject">
+        <field key="chat_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- Владелец: файл грузится ДО того, как появился чат, поэтому
+             принадлежность проверяется по пользователю, а не по chat_id. -->
+        <field key="user_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="message_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="source_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="path" dbtype="varchar" precision="255" phptype="string" null="false" default=""/>
+        <field key="name" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="mime" dbtype="varchar" precision="100" phptype="string" null="false" default=""/>
+        <field key="size" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="createdon" dbtype="datetime" phptype="datetime" null="true"/>
+        <index alias="chat_id" name="chat_id" primary="false" unique="false" type="BTREE">
+            <column key="chat_id" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <!-- Лог вызовов: расход и отладка. Без него не понять ни стоимость,
+         ни почему ИИ ответил именно так. -->
+    <object class="gtsAILog" table="gtsai_log" extends="xPDOSimpleObject">
+        <field key="user_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="setting" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="chat_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="conn_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="model" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="page_url" dbtype="varchar" precision="255" phptype="string" null="true" default=""/>
+        <field key="tokens_in" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="tokens_out" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="cache_read" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="cost" dbtype="decimal" precision="12,4" phptype="float" null="false" default="0"/>
+        <field key="ms" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="iterations" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="tools" dbtype="text" phptype="string" null="true"/>
+        <field key="status" dbtype="varchar" precision="20" phptype="string" null="false" default=""/>
+        <field key="error" dbtype="text" phptype="string" null="true"/>
+        <field key="createdon" dbtype="datetime" phptype="datetime" null="true"/>
+        <index alias="user_id" name="user_id" primary="false" unique="false" type="BTREE">
+            <column key="user_id" length="" collation="A" null="false"/>
+        </index>
+        <index alias="createdon" name="createdon" primary="false" unique="false" type="BTREE">
+            <column key="createdon" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+</model>
