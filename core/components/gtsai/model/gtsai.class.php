@@ -430,7 +430,11 @@ class gtsAI
 
         $limit = isset($input['limit']) ? (int)$input['limit'] : 50;
         $limit = max(1, min($limit, 200));
-        if (!preg_match('~\blimit\s+\d~i', $query)) $query .= ' LIMIT ' . $limit;
+        // Лимит дописываем только выборкам: SHOW и DESCRIBE его не принимают
+        // и падают синтаксической ошибкой.
+        if (preg_match('~^\s*(select|with)\s~i', $query) && !preg_match('~\blimit\s+\d~i', $query)) {
+            $query .= ' LIMIT ' . $limit;
+        }
 
         try {
             $stmt = $pdo->query($query);

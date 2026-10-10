@@ -6,13 +6,10 @@ export default {
         value: '{"claude-opus-5-5":{"in":10,"out":50},"claude-opus-5":{"in":5,"out":25},"claude-sonnet-5":{"in":2,"out":10}}',
         area: 'gtsai_main',
     },
-    // Страница «Чат ИИ» в разделе Администратор (resources.js) и пункт меню
-    // менеджера ссылаются на одну и ту же настройку: приложение одно.
-    'p_chat': {
-        xtype: 'textarea',
-        value: '{"mixVue":{"app":"gtsai","config":{"setting":"admin","dock":"inline"}}}',
-        area: 'gtsai_main',
-    },
+    // Настройки `gtsai_p_chat` здесь нет намеренно: её держит резолвер страниц
+    // (`_build/configs/resources.js` → `config_name`) и хранит в ней id страницы
+    // «Чат ИИ». Что на странице показывать — задаётся не настройкой, а файлом
+    // `core/components/gtsai/elements/resources/web/ai.tpl`.
 
     // --- Доступ к базе только на чтение ---------------------------------
     //

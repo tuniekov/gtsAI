@@ -127,6 +127,43 @@ abstract class gtsAIProvider
      */
     public function stream(array $req, callable $onEvent)
     {
+        // Повтор только тогда, когда не пришло НИ ОДНОГО байта: соединение не
+        // встало, модель ничего не сделала, повторять нечего бояться. Если
+        // поток уже начался, второй попытки быть не может — часть ответа
+        // (и, возможно, вызовы инструментов) уже ушла наружу.
+        $attempt = 0;
+        while (true) {
+            $got = false;
+            $res = $this->streamOnce($req, function ($ev) use ($onEvent, &$got) {
+                $got = true;
+                $onEvent($ev);
+            }, $netError);
+
+            if ($res !== false || $got || $netError === '' || $attempt >= self::CONNECT_RETRIES) {
+                if ($res === false && !$got) {
+                    $onEvent(['type' => 'error', 'message' => $netError !== ''
+                        ? 'Сеть: ' . $netError
+                        : 'Провайдер не ответил.']);
+                }
+                return $res;
+            }
+
+            $attempt++;
+            // Пауза растёт: 1 с, 3 с. Провайдер обычно отлипает за эти секунды.
+            sleep($attempt * 2 - 1);
+        }
+    }
+
+    /** Сколько раз повторить вызов, если соединение так и не встало. */
+    const CONNECT_RETRIES = 2;
+
+    /**
+     * Одна попытка стрима. Сетевую ошибку отдаёт через $netError, а не
+     * событием: решение, повторять или показывать, принимает stream().
+     */
+    protected function streamOnce(array $req, callable $onEvent, &$netError)
+    {
+        $netError = '';
         $this->buf = '';
         $ch = curl_init($this->url());
         curl_setopt_array($ch, [
@@ -157,7 +194,7 @@ abstract class gtsAIProvider
         curl_close($ch);
 
         if ($err) {
-            $onEvent(['type' => 'error', 'message' => 'Сеть: ' . $err]);
+            $netError = $err;
             return false;
         }
         if ($code >= 400) {

@@ -8,6 +8,7 @@
     :default-dock="dock"
     :default-open="openByDefault"
     :launcher="launcher"
+    :fill="fill"
   />
 </template>
 
@@ -28,4 +29,7 @@ const dock = cfg.dock || 'right'
 // На странице админки чат встроен в поток и открыт сразу, запускатель не нужен.
 const openByDefault = cfg.open !== undefined ? !!cfg.open : dock === 'inline'
 const launcher = cfg.launcher !== undefined ? !!cfg.launcher : dock !== 'inline'
+// На своей странице чат — её содержимое: во весь экран и без лишних
+// заголовков. Внутри вкладок админки это выключено: там он один из блоков.
+const fill = cfg.fill !== undefined ? !!cfg.fill : false
 </script>
