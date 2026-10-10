@@ -44,6 +44,9 @@ class gtsAI
     /** @var PDO|null соединение только на чтение (отдельный пользователь базы) */
     protected $sqlPdo = null;
 
+    /** @var array|null доступы читающего пользователя, прочитанные один раз */
+    protected $sqlCreds = null;
+
     /** @var bool ответ дошёл до конца штатно */
     protected $turnDone = false;
 
@@ -363,7 +366,8 @@ class gtsAI
     protected function sqlToolDefs()
     {
         if (empty($this->setting['allow_sql'])) return [];
-        if (!$this->modx->getOption('gtsai_sql_dsn', null, '')) return [];
+        $creds = $this->sqlCreds();
+        if ($creds['user'] === '' || $creds['password'] === '') return [];
 
         return [[
             'name'         => 'sql_query',
@@ -382,15 +386,49 @@ class gtsAI
         ]];
     }
 
+    /**
+     * Доступы читающего пользователя.
+     *
+     * ⚠️ Читаем НАПРЯМУЮ из таблицы настроек, а не через getOption: настройки
+     * заводит SQL-скрипт из README, минуя MODX, и кэш о них ещё не знает.
+     * Иначе после скрипта пришлось бы отдельно чистить кэш, а смысл скрипта
+     * ровно в том, чтобы ничего больше руками не делать.
+     *
+     * Адрес базы по умолчанию — тот же, которым ходит сам сайт. Это снимает
+     * самую частую ошибку: на OSPanel база доступна по имени модуля
+     * (`mysql:host=mysql-5.7`), а не по `localhost`. Настройка `gtsai_sql_dsn`
+     * нужна, только если читать надо другую базу или другой сервер.
+     */
+    protected function sqlCreds()
+    {
+        if ($this->sqlCreds !== null) return $this->sqlCreds;
+
+        $read = function ($key) {
+            $o = $this->modx->getObject('modSystemSetting', ['key' => $key]);
+            return $o ? trim((string)$o->get('value')) : '';
+        };
+
+        $dsn = $read('gtsai_sql_dsn');
+        if ($dsn === '') $dsn = (string)$this->modx->config['dsn'];
+
+        $this->sqlCreds = [
+            'dsn'      => $dsn,
+            'user'     => $read('gtsai_sql_user'),
+            'password' => $read('gtsai_sql_password'),
+        ];
+        return $this->sqlCreds;
+    }
+
     /** Соединение только на чтение. Создаётся при первом запросе. */
     protected function sqlConnect()
     {
         if ($this->sqlPdo !== null) return $this->sqlPdo;
 
-        $dsn  = (string)$this->modx->getOption('gtsai_sql_dsn', null, '');
-        $user = (string)$this->modx->getOption('gtsai_sql_user', null, '');
-        $pass = (string)$this->modx->getOption('gtsai_sql_password', null, '');
-        if ($dsn === '') return null;
+        $creds = $this->sqlCreds();
+        $dsn  = $creds['dsn'];
+        $user = $creds['user'];
+        $pass = $creds['password'];
+        if ($dsn === '' || $user === '' || $pass === '') return null;
 
         try {
             $this->sqlPdo = new PDO($dsn, $user, $pass, [
@@ -412,7 +450,7 @@ class gtsAI
             return ['error' => 'SQL для этого чата не разрешён.'];
         }
         $pdo = $this->sqlConnect();
-        if (!$pdo) return ['error' => 'Доступ к базе на чтение не настроен (gtsai_sql_dsn).'];
+        if (!$pdo) return ['error' => 'Доступ к базе на чтение не настроен: нет читающего пользователя (см. README пакета gtsAI).'];
 
         $query = isset($input['query']) ? trim((string)$input['query']) : '';
         if ($query === '') return ['error' => 'Пустой запрос.'];
