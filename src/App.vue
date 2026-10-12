@@ -15,17 +15,25 @@
        (меню Компоненты -> ИИ), где человек как раз заводит подключение и ищет,
        где взять ключ. На рабочих страницах выключено: там это шум. -->
   <aside v-if="promo" class="gtsai-promo">
+    <img class="gtsai-promo-logo" :src="logo" alt="" width="40" height="40">
     <div class="gtsai-promo-text">
-      <b>Шлюз gtsAI</b> — через него чат ходит к моделям Claude.
-      Один ключ на все приложения; подписка и оплата по балансу — на сайте
-      сервиса. Ключ вписывается во вкладке «Подключения».
+      <div class="gtsai-promo-title">Шлюз gtsAI</div>
+      <div class="gtsai-promo-sub">
+        Через него чат ходит к моделям Claude. Один ключ на все приложения,
+        подписка и оплата по балансу. Ключ вписывается во вкладке «Подключения».
+      </div>
     </div>
-    <a class="gtsai-promo-link" href="https://gtsai.ru" target="_blank" rel="noopener">gtsai.ru</a>
+    <a class="gtsai-promo-link" href="https://gtsai.ru" target="_blank" rel="noopener">
+      Открыть gtsai.ru
+    </a>
   </aside>
 </template>
 
 <script setup>
 import { GtsAIDock } from 'pvtables/dist/pvtables'
+// Логотип сервиса — файлом в сборке: Vite сам подставит правильный адрес,
+// и путь не зависит от того, в какой папке стоит MODX.
+import logo from './assets/gtsai-logo.svg'
 
 // mixVue кладёт конфиг глобальным `let gtsaiConfigs` (не в window), поэтому
 // читаем через typeof — иначе на странице без конфига будет ReferenceError.
@@ -56,24 +64,52 @@ const promo = cfg.promo !== undefined ? !!cfg.promo : true
 .gtsai-promo {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.875rem;
   margin-top: 0.5rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
   border: 1px solid var(--gts-line);
   border-radius: var(--gts-radius);
-  background: var(--gts-accent-soft);
+  background: var(--gts-surface-2);
   color: var(--gts-ink);
-  font-size: var(--gts-size-sm);
+}
+/* Логотип сервиса — собственная графика бренда, поэтому свои цвета у него
+   законны; подложку под него не красим, он читается на любой схеме. */
+.gtsai-promo-logo {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--gts-radius-s);
 }
 .gtsai-promo-text { flex: 1; min-width: 0; }
+.gtsai-promo-title {
+  font-weight: var(--gts-weight-bold, 600);
+  line-height: 1.2;
+}
+.gtsai-promo-sub {
+  margin-top: 0.125rem;
+  color: var(--gts-ink-2);
+  font-size: var(--gts-size-sm);
+  line-height: 1.35;
+}
 .gtsai-promo-link {
   flex: none;
-  padding: 0.25rem 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  height: var(--gts-control-h);
+  padding: 0 0.875rem;
   border: 1px solid var(--gts-accent);
   border-radius: var(--gts-radius-s);
-  color: var(--gts-accent);
+  background: var(--gts-accent);
+  color: var(--gts-accent-contrast);
+  font-size: var(--gts-size-sm);
   text-decoration: none;
   white-space: nowrap;
 }
-.gtsai-promo-link:hover { background: var(--gts-accent); color: var(--gts-accent-contrast); }
+.gtsai-promo-link:hover { background: var(--gts-accent-hover); border-color: var(--gts-accent-hover); }
+
+/* Узкое окно: кнопка уезжает под текст, а не режет его. */
+@media (max-width: 36rem) {
+  .gtsai-promo { flex-wrap: wrap; }
+  .gtsai-promo-text { flex-basis: 100%; order: 3; }
+}
 </style>
