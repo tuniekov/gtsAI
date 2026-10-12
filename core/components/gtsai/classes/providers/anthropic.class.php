@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Протокол Anthropic (Messages API). Основной для нас: neiro-api.ru говорит им же
+ * Протокол Anthropic (Messages API). Основной для нас: gtsai.ru говорит им же
  * и отдаёт стандартные события message_start / content_block_delta / message_stop.
  */
 class gtsAIProviderAnthropic extends gtsAIProvider
