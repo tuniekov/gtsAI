@@ -15,7 +15,9 @@
        (меню Компоненты -> ИИ), где человек как раз заводит подключение и ищет,
        где взять ключ. На рабочих страницах выключено: там это шум. -->
   <aside v-if="promo" class="gtsai-promo">
-    <img class="gtsai-promo-logo" :src="logo" alt="" width="40" height="40">
+    <a class="gtsai-promo-mark" href="https://gtsai.ru" target="_blank" rel="noopener" title="Открыть gtsai.ru">
+      <img :src="logo" alt="gtsAI" width="40" height="40">
+    </a>
     <div class="gtsai-promo-text">
       <div class="gtsai-promo-title">Шлюз gtsAI</div>
       <div class="gtsai-promo-sub">
@@ -73,12 +75,24 @@ const promo = cfg.promo !== undefined ? !!cfg.promo : true
   color: var(--gts-ink);
 }
 /* Логотип сервиса — собственная графика бренда, поэтому свои цвета у него
-   законны; подложку под него не красим, он читается на любой схеме. */
-.gtsai-promo-logo {
+   законны; подложку под него не красим, он читается на любой схеме.
+   Сам логотип тоже ведёт на сайт: так ожидают от логотипа. */
+.gtsai-promo-mark {
   flex: none;
+  display: block;
+  line-height: 0;
+  border-radius: var(--gts-radius-s);
+}
+.gtsai-promo-mark img {
   width: 40px;
   height: 40px;
   border-radius: var(--gts-radius-s);
+  display: block;
+}
+.gtsai-promo-mark:hover { opacity: 0.85; }
+.gtsai-promo-mark:focus-visible {
+  outline: 2px solid var(--gts-accent);
+  outline-offset: 2px;
 }
 .gtsai-promo-text { flex: 1; min-width: 0; }
 .gtsai-promo-title {
