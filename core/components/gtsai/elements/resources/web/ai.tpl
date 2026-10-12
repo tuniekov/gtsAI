@@ -3,6 +3,7 @@
     'config'=>[
         'setting'=>'admin',
         'dock'=>'inline',
-        'fill'=>true
+        'fill'=>true,
+        'promo'=>false
     ]
 ]}
