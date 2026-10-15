@@ -361,7 +361,56 @@ class gtsAI
                     'required'   => ['table'],
                 ],
             ],
-        ], $this->promptToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
+        ], $this->actionToolDefs(), $this->promptToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
+    }
+
+    /**
+     * Вызов действия таблицы. Это тот же контракт gtsAPI, что у людей:
+     * table + api_action + параметры. Своей логики здесь нет - что можно,
+     * решает конфиг таблицы, а не шлюз.
+     *
+     * Пускает ядро: действие должно быть объявлено в actions таблицы с
+     * 'ai':1, а чтобы работать в чате без права записи - ещё и 'ai_read':1.
+     */
+    protected function actionToolDefs()
+    {
+        if (empty($this->setting['allow_gtsapi'])) return [];
+
+        return [[
+            'name'         => 'run_action',
+            'description'  =>
+                'Вызвать действие таблицы (то же, что делает интерфейс: table + action).' . "\n" .
+                'Какие действия есть у таблицы и что они принимают - смотри в table_config, раздел actions.' . "\n" .
+                'Пример: table=gsProduct, action=gtsshop/product_params, params={"product_ids":[629,1107]} - вернёт параметры изделий со списками допустимых значений одним запросом, вместо обхода справочников по одному.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'table'  => ['type' => 'string', 'description' => 'Таблица gtsAPI'],
+                    'action' => ['type' => 'string', 'description' => 'Имя действия, например gtsshop/product_params'],
+                    'params' => ['type' => 'object', 'description' => 'Параметры действия'],
+                ],
+                'required'   => ['table', 'action'],
+            ],
+        ]];
+    }
+
+    /** Выполнить действие таблицы и вернуть ответ как есть. */
+    protected function runAction(array $input, array $scope = [])
+    {
+        $table  = isset($input['table']) ? (string)$input['table'] : '';
+        $action = isset($input['action']) ? (string)$input['action'] : '';
+        if ($table === '' || $action === '') return ['error' => 'Нужны table и action.'];
+
+        $params = isset($input['params']) && is_array($input['params']) ? $input['params'] : [];
+        // Область работы задаёт сервер - так же, как в чтении и записи.
+        foreach ($scope as $k => $v) $params[$k] = $v;
+
+        $resp = $this->needBridge()->call($table, $action, $params);
+        if (empty($resp['success'])) {
+            return ['error' => isset($resp['message']) && $resp['message'] !== ''
+                ? $resp['message'] : 'Действие не выполнено.'];
+        }
+        return isset($resp['data']) ? $resp['data'] : $resp;
     }
 
     /**
@@ -581,6 +630,9 @@ class gtsAI
                 ]));
                 $readAction = isset($input['action']) ? (string)$input['action'] : 'read';
                 return $this->bridge->read($table, $request, $scope, $fields, $readAction);
+
+            case 'run_action':
+                return $this->capResult($this->runAction($input, $scope));
 
             case 'read_prompt':
                 return $this->readPrompt($input);
