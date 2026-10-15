@@ -65,6 +65,22 @@
         </index>
     </object>
 
+    <!-- Доппромпты: именованные куски системного промпта, привязанные к настройке
+         чата. Нужны, чтобы правила можно было копить и править по одному, а не
+         держать одной простынёй: текст промпта растёт, а менять в нём обычно
+         надо один абзац. Порядок задаётся rank, выключенный доппромпт не
+         подставляется. -->
+    <object class="gtsAIPrompt" table="gtsai_prompts" extends="xPDOSimpleObject">
+        <field key="setting_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="name" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="text" dbtype="mediumtext" phptype="string" null="true"/>
+        <field key="active" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="rank" dbtype="int" precision="10" phptype="integer" null="false" default="0"/>
+        <index alias="setting_id" name="setting_id" primary="false" unique="false" type="BTREE">
+            <column key="setting_id" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
     <object class="gtsAIMessage" table="gtsai_messages" extends="xPDOSimpleObject">
         <field key="chat_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
         <field key="role" dbtype="varchar" precision="20" phptype="string" null="false" default="user"/>

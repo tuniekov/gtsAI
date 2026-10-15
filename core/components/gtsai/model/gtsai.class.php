@@ -1452,6 +1452,17 @@ class gtsAI
     {
         $prompt = isset($this->setting['prompt']) ? (string)$this->setting['prompt'] : '';
 
+        // Доппромпты этой настройки. Каждый - отдельная запись с именем, чтобы
+        // правило можно было дописать или выключить, не трогая остальной текст.
+        // Имя уходит модели заголовком: по нему же её просят что-то изменить.
+        foreach ($this->extraPrompts() as $extra) {
+            if (trim((string)$extra['text']) === '') continue;
+            $prompt .= "
+
+## " . $extra['name'] . "
+" . $extra['text'];
+        }
+
         // Контекст страницы — только адрес и GET. Данные модель берёт
         // инструментами сама: иначе каждое сообщение тащит мегабайт и кэш
         // системного промпта перестаёт работать.
@@ -1465,6 +1476,23 @@ class gtsAI
         }
         $prompt .= "\n\nПользователь: " . $this->modx->user->get('username');
         return $prompt;
+    }
+
+    /** Доппромпты настройки по порядку. Выключенные пропускаем. */
+    protected function extraPrompts()
+    {
+        if (empty($this->setting['id'])) return [];
+
+        $c = $this->modx->newQuery('gtsAIPrompt');
+        $c->where(['setting_id' => (int)$this->setting['id'], 'active' => 1]);
+        $c->sortby('rank', 'ASC');
+        $c->sortby('id', 'ASC');
+
+        $rows = [];
+        foreach ($this->modx->getCollection('gtsAIPrompt', $c) as $row) {
+            $rows[] = ['name' => $row->get('name'), 'text' => (string)$row->get('text')];
+        }
+        return $rows;
     }
 
     /* ------------------------------------------------------------------ *

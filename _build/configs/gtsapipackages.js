@@ -39,12 +39,34 @@ export default {
             gtsAISetting: {
                 table: 'gtsAISetting',
                 class: 'gtsAISetting',
-                version: 4,
+                version: 5,
                 authenticated: true,
                 groups: 'Administrator',
+                // ИИ правит собственные промпты. Отдельной проверки «только
+                // админу» не нужно: таблица и так открыта только группе
+                // Administrator, а права пользователя для ИИ - потолок.
+                ai: 1,
+                description: 'Настройки чатов ИИ: промпт, модель, права и лимиты. prompt - общий системный промпт; длинные правила лучше держать доппромптами (таблица gtsAIPrompt, поле setting_id).',
                 active: true,
                 properties: {
-                    actions: { read: {}, create: {}, update: {}, delete: {} },
+                    actions: {
+                        read: { ai: 1 },
+                        create: {},
+                        update: { ai: 1 },
+                        delete: {},
+                        subtabs: {
+                            prompts: {
+                                gtsAIPrompt: {
+                                    title: 'Доппромпты',
+                                    table: 'gtsAIPrompt',
+                                    where: { setting_id: 'id' },
+                                },
+                            },
+                        },
+                    },
+                    // Правки от ИИ разрешены только с версионированием строки:
+                    // иначе откатывать нечем.
+                    save_version_row: true,
                     autocomplete: { tpl: '{$name}', limit: 0 },
                     fields: {
                         id: { type: 'view', class: 'gtsAISetting' },
@@ -53,7 +75,9 @@ export default {
                         active: { label: 'Включено', type: 'boolean', class: 'gtsAISetting' },
                         conn_id: { label: 'Подключение', type: 'autocomplete', table: 'gtsAIConn', class: 'gtsAISetting' },
                         model: { label: 'Модель (если своя)', type: 'text', class: 'gtsAISetting' },
-                        prompt: { label: 'Системный промпт', type: 'textarea', class: 'gtsAISetting' },
+                        // Промпт длинный и в таблице раздвигал колонки: показываем
+                        // первые 100 символов, полный текст - в подсказке и в форме.
+                        prompt: { label: 'Системный промпт', type: 'textarea', truncate: 100, class: 'gtsAISetting' },
                         groups: { label: 'Группы MODX (через запятую)', type: 'text', class: 'gtsAISetting' },
                         allow_gtsapi: { label: 'Доступ к gtsAPI', type: 'boolean', class: 'gtsAISetting' },
                         allow_sql: { label: 'Доступ к SQL (только чтение)', type: 'boolean', class: 'gtsAISetting' },
@@ -66,6 +90,39 @@ export default {
                         max_iterations: { label: 'Макс. шагов с инструментами', type: 'number', class: 'gtsAISetting' },
                         max_seconds: { label: 'Макс. секунд на ответ', type: 'number', class: 'gtsAISetting' },
                         day_limit: { label: 'Лимит на юзера в день, $', type: 'decimal', FractionDigits: 2, class: 'gtsAISetting' },
+                    },
+                },
+            },
+
+            // Доппромпты — куски системного промпта с именами. Открыты ИИ на
+            // чтение, создание и правку: ради этого всё и затевалось - чат
+            // должен уметь записать правило, которое ему продиктовали.
+            gtsAIPrompt: {
+                table: 'gtsAIPrompt',
+                class: 'gtsAIPrompt',
+                version: 1,
+                authenticated: true,
+                groups: 'Administrator',
+                ai: 1,
+                description: 'Доппромпты: именованные куски системного промпта. setting_id - к какой настройке чата относится, name - заголовок правила, text - сам текст, active - подставлять ли, rank - порядок. Все активные доппромпты настройки дописываются к её системному промпту.',
+                active: true,
+                properties: {
+                    actions: {
+                        read: { ai: 1 },
+                        create: { ai: 1 },
+                        update: { ai: 1 },
+                        delete: {},
+                    },
+                    save_version_row: true,
+                    query: { sortby: { 'gtsAIPrompt.rank': 'ASC', 'gtsAIPrompt.id': 'ASC' } },
+                    autocomplete: { tpl: '{$name}', limit: 0 },
+                    fields: {
+                        id: { type: 'view', class: 'gtsAIPrompt' },
+                        setting_id: { label: 'Настройка чата', type: 'autocomplete', table: 'gtsAISetting', class: 'gtsAIPrompt' },
+                        name: { label: 'Название', type: 'text', class: 'gtsAIPrompt' },
+                        text: { label: 'Текст', type: 'textarea', truncate: 100, class: 'gtsAIPrompt' },
+                        active: { label: 'Включён', type: 'boolean', class: 'gtsAIPrompt' },
+                        rank: { label: 'Порядок', type: 'number', class: 'gtsAIPrompt' },
                     },
                 },
             },

@@ -13,6 +13,15 @@
 export default {
     'modx28': {
         'web': {
+            'ai-nastroyki': {
+                'pagetitle': 'Настройки ИИ',
+                'published': true,
+                'hidemenu': false,
+                'config_name': 'gtsai_p_settings',
+                'parent': 248,
+                'properties': { 'templatename': 'adminTemplate' },
+                'groups': 'administrator',
+            },
             'ai': {
                 'pagetitle': 'Чат ИИ',
                 'published': true,
@@ -29,6 +38,14 @@ export default {
 
     'vk24': {
         'web': {
+            'ai-nastroyki': {
+                'pagetitle': 'Настройки ИИ',
+                'published': true,
+                'hidemenu': false,
+                'config_name': 'gtsai_p_settings',
+                'parent': 197,
+                'properties': { 'templatename': 'Логистика' },
+            },
             'ai': {
                 'pagetitle': 'Чат ИИ',
                 'published': true,
