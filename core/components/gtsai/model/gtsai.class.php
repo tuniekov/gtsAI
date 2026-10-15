@@ -50,6 +50,12 @@ class gtsAI
     /** @var array|null доппромпты настройки, прочитанные один раз */
     protected $extras = null;
 
+    /**
+     * Сколько байт шагов хода храним и пересылаем обратно. Больше - дороже
+     * каждое следующее сообщение в этом чате: история уходит провайдеру целиком.
+     */
+    const TURN_KEEP_BYTES = 60000;
+
     /** @var bool ответ дошёл до конца штатно */
     protected $turnDone = false;
 
@@ -523,7 +529,7 @@ class gtsAI
                     'rows'   => [
                         'type'        => 'array',
                         'items'       => ['type' => 'object'],
-                        'description' => 'Запросы к действию, не больше 100 за раз',
+                        'description' => 'Строки одним массивом: все сразу, а не по одной за вызов. До 100 за раз',
                     ],
                     'reason' => ['type' => 'string', 'description' => 'Зачем правка — попадёт в чат пользователю'],
                 ],
@@ -927,6 +933,9 @@ class gtsAI
         $failed    = '';
         $stop      = '';
         $iteration = 0;
+        // Всё, что добавится в $messages дальше, - шаги этого хода: пары
+        // «запрос инструмента - результат». Их и сохраним вместе с ответом.
+        $turnStart = count($messages);
 
         for ($iteration = 1; $iteration <= $maxIter; $iteration++) {
             $turnText = '';
@@ -1006,7 +1015,14 @@ class gtsAI
         }
 
         $usage = $provider->getUsage();
-        $this->saveMessage($chat, 'assistant', $answerAll, isset($usage['out']) ? (int)$usage['out'] : 0);
+        $this->saveMessage(
+            $chat,
+            'assistant',
+            $answerAll,
+            isset($usage['out']) ? (int)$usage['out'] : 0,
+            [],
+            array_slice($messages, $turnStart)
+        );
         $this->writeLog($chat, $usage, $started, $failed ? 'error' : 'ok', $failed, $usedTools, min($iteration, $maxIter));
 
         $this->turnDone = true;
@@ -1488,6 +1504,27 @@ class gtsAI
         return $prompt;
     }
 
+    /**
+     * Починка сохранённого шага перед отправкой обратно провайдеру.
+     *
+     * ⚠️ Инструмент без аргументов уходил как `{}`, но json_decode в массив
+     * возвращает его пустым МАССИВОМ, и обратно он кодируется как `[]`.
+     * Anthropic на это отвечает 400, и продолжение разговора падало целиком -
+     * ровно на тех чатах, где был вызов без аргументов (list_tables).
+     */
+    protected function healStep(array $step)
+    {
+        if (!is_array($step['content'])) return $step;
+
+        foreach ($step['content'] as $i => $block) {
+            if (($block['type'] ?? '') !== 'tool_use') continue;
+            if (!isset($block['input']) || (is_array($block['input']) && !$block['input'])) {
+                $step['content'][$i]['input'] = new stdClass();
+            }
+        }
+        return $step;
+    }
+
     /** Доппромпты настройки по порядку. Выключенные пропускаем. */
     protected function extraPrompts()
     {
@@ -1595,7 +1632,27 @@ class gtsAI
             $c = $this->modx->newQuery('gtsAIMessage');
             $c->where(['chat_id' => $chat->id]);
             $c->sortby('id', 'ASC');
+            $rows = [];
             foreach ($this->modx->getCollection('gtsAIMessage', $c) as $msg) {
+                $rows[] = $msg;
+            }
+
+            // Шаги инструментов возвращаем только у ПОСЛЕДНЕГО хода с ними.
+            // Иначе каждая прошлая выгрузка ехала бы в каждом новом сообщении,
+            // и разговор дорожал бы с каждым ходом; для давних ответов хватает
+            // их текста - что сделано, там написано словами.
+            //
+            // Ищем именно ответ СО ШАГАМИ: ответ без инструментов (а то и
+            // пустой, если провайдер сорвался) не должен перекрывать собой
+            // предыдущий ход и стирать модели память о сделанном.
+            $lastAssistant = -1;
+            foreach ($rows as $i => $msg) {
+                if ($msg->get('role') !== 'assistant') continue;
+                $b = json_decode((string)$msg->get('blocks'), true);
+                if (is_array($b) && !empty($b['turn'])) $lastAssistant = $i;
+            }
+
+            foreach ($rows as $i => $msg) {
                 $role = $msg->get('role');
                 if ($role !== 'user' && $role !== 'assistant') continue;
                 $content = (string)$msg->get('content');
@@ -1605,6 +1662,14 @@ class gtsAI
                     $blocks = json_decode((string)$msg->get('blocks'), true);
                     if (is_array($blocks) && !empty($blocks['file_ids'])) {
                         $old = $this->fileBlocks((array)$blocks['file_ids']);
+                    }
+                } elseif ($i === $lastAssistant) {
+                    $blocks = json_decode((string)$msg->get('blocks'), true);
+                    if (is_array($blocks) && !empty($blocks['turn']) && is_array($blocks['turn'])) {
+                        foreach ($blocks['turn'] as $step) {
+                            if (!isset($step['role'], $step['content'])) continue;
+                            $messages[] = $this->healStep($step);
+                        }
                     }
                 }
                 if ($content === '' && !$old) continue;
@@ -1646,18 +1711,36 @@ class gtsAI
     }
 
     /** Одно сообщение чата. Порядок в истории — порядок записи. */
-    protected function saveMessage($chat, $role, $content, $tokensOut = 0, array $fileIds = [])
+    protected function saveMessage($chat, $role, $content, $tokensOut = 0, array $fileIds = [], array $turn = [])
     {
         if (!$chat) return;
+        // Пустой ответ (провайдер сорвался, текста не было) в историю не пишем:
+        // показывать в чате нечего, а модели он только мешает.
+        if ($role === 'assistant' && trim((string)$content) === '' && !$turn) return;
         $now = date('Y-m-d H:i:s');
+
+        // В blocks у пользователя - только ССЫЛКИ на файлы: само содержимое
+        // лежит на диске и подкладывается при каждой отправке истории.
+        // У ответа - шаги хода: что модель спросила у инструментов и что
+        // получила. Без них продолжение разговора («продолжай») начиналось
+        // с чистого листа: в истории оставался только текст ответа, и модель
+        // заново искала то, что уже нашла.
+        $blocks = null;
+        if ($fileIds) {
+            $blocks = json_encode(['file_ids' => $fileIds], JSON_UNESCAPED_UNICODE);
+        } elseif ($turn) {
+            $packed = json_encode(['turn' => $turn], JSON_UNESCAPED_UNICODE);
+            // Ход с десятком выгрузок тянет на сотни килобайт. Храним только
+            // то, что не жалко переслать обратно; остальное - как раньше,
+            // текстом ответа.
+            if ($packed !== false && strlen($packed) <= self::TURN_KEEP_BYTES) $blocks = $packed;
+        }
 
         $this->modx->newObject('gtsAIMessage', [
             'chat_id'    => $chat->id,
             'role'       => $role,
             'content'    => $content,
-            // В blocks держим только ССЫЛКИ на файлы: само содержимое лежит на
-            // диске и подкладывается при каждой отправке истории.
-            'blocks'     => $fileIds ? json_encode(['file_ids' => $fileIds]) : null,
+            'blocks'     => $blocks,
             'tokens_out' => (int)$tokensOut,
             'createdon'  => $now,
         ])->save();
