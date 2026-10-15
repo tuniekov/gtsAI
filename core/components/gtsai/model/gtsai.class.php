@@ -47,6 +47,9 @@ class gtsAI
     /** @var array|null доступы читающего пользователя, прочитанные один раз */
     protected $sqlCreds = null;
 
+    /** @var array|null доппромпты настройки, прочитанные один раз */
+    protected $extras = null;
+
     /** @var bool ответ дошёл до конца штатно */
     protected $turnDone = false;
 
@@ -352,7 +355,7 @@ class gtsAI
                     'required'   => ['table'],
                 ],
             ],
-        ], $this->sqlToolDefs(), $this->writeToolDefs());
+        ], $this->promptToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
     }
 
     /**
@@ -572,6 +575,9 @@ class gtsAI
                 ]));
                 $readAction = isset($input['action']) ? (string)$input['action'] : 'read';
                 return $this->bridge->read($table, $request, $scope, $fields, $readAction);
+
+            case 'read_prompt':
+                return $this->readPrompt($input);
 
             case 'sql_query':
                 return $this->runSql($input);
@@ -1452,15 +1458,19 @@ class gtsAI
     {
         $prompt = isset($this->setting['prompt']) ? (string)$this->setting['prompt'] : '';
 
-        // Доппромпты этой настройки. Каждый - отдельная запись с именем, чтобы
-        // правило можно было дописать или выключить, не трогая остальной текст.
-        // Имя уходит модели заголовком: по нему же её просят что-то изменить.
-        foreach ($this->extraPrompts() as $extra) {
-            if (trim((string)$extra['text']) === '') continue;
-            $prompt .= "
-
-## " . $extra['name'] . "
-" . $extra['text'];
+        // Доппромпты попадают сюда ТОЛЬКО списком: имя и строчка «когда нужно».
+        // Текст модель подгружает инструментом read_prompt, если решит, что
+        // правило к делу. Иначе весь свод ехал бы в каждом запросе: это и
+        // деньги, и размытое внимание - правило про импорт заявок мешает,
+        // когда спрашивают про цену.
+        $extras = $this->extraPrompts();
+        if ($extras) {
+            $prompt .= "\n\nДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА (подгружай инструментом read_prompt по имени,"
+                . " когда правило относится к задаче; содержание по названию не угадывай):";
+            foreach ($extras as $extra) {
+                $prompt .= "\n- " . $extra['name']
+                    . ($extra['description'] !== '' ? ': ' . $extra['description'] : '');
+            }
         }
 
         // Контекст страницы — только адрес и GET. Данные модель берёт
@@ -1481,7 +1491,8 @@ class gtsAI
     /** Доппромпты настройки по порядку. Выключенные пропускаем. */
     protected function extraPrompts()
     {
-        if (empty($this->setting['id'])) return [];
+        if ($this->extras !== null) return $this->extras;
+        if (empty($this->setting['id'])) return $this->extras = [];
 
         $c = $this->modx->newQuery('gtsAIPrompt');
         $c->where(['setting_id' => (int)$this->setting['id'], 'active' => 1]);
@@ -1490,9 +1501,51 @@ class gtsAI
 
         $rows = [];
         foreach ($this->modx->getCollection('gtsAIPrompt', $c) as $row) {
-            $rows[] = ['name' => $row->get('name'), 'text' => (string)$row->get('text')];
+            $rows[] = [
+                'name'        => (string)$row->get('name'),
+                'description' => trim((string)$row->get('description')),
+                'text'        => (string)$row->get('text'),
+            ];
         }
-        return $rows;
+        return $this->extras = $rows;
+    }
+
+    /**
+     * Инструмент чтения правила. Отдаётся модели, только если у настройки
+     * вообще есть доппромпты - иначе его описание занимало бы место впустую.
+     */
+    protected function promptToolDefs()
+    {
+        if (!$this->extraPrompts()) return [];
+
+        return [[
+            'name'         => 'read_prompt',
+            'description'  =>
+                'Прочитать полный текст дополнительного правила по имени. Имена и краткие описания перечислены в системном промпте.' . "\n" .
+                'Зови, когда правило относится к задаче: содержание по названию не угадывай.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'name' => ['type' => 'string', 'description' => 'Имя правила из списка'],
+                ],
+                'required'   => ['name'],
+            ],
+        ]];
+    }
+
+    /** Текст правила по имени. */
+    protected function readPrompt(array $input)
+    {
+        $name = isset($input['name']) ? trim((string)$input['name']) : '';
+        if ($name === '') return ['error' => 'Не указано имя правила.'];
+
+        foreach ($this->extraPrompts() as $extra) {
+            if (mb_strtolower($extra['name']) === mb_strtolower($name)) {
+                return ['name' => $extra['name'], 'text' => $extra['text']];
+            }
+        }
+        return ['error' => 'Такого правила нет. Есть: '
+            . implode(', ', array_column($this->extraPrompts(), 'name')) . '.'];
     }
 
     /* ------------------------------------------------------------------ *

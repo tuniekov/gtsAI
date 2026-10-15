@@ -100,11 +100,11 @@ export default {
             gtsAIPrompt: {
                 table: 'gtsAIPrompt',
                 class: 'gtsAIPrompt',
-                version: 1,
+                version: 2,
                 authenticated: true,
                 groups: 'Administrator',
                 ai: 1,
-                description: 'Доппромпты: именованные куски системного промпта. setting_id - к какой настройке чата относится, name - заголовок правила, text - сам текст, active - подставлять ли, rank - порядок. Все активные доппромпты настройки дописываются к её системному промпту.',
+                description: 'Доппромпты: правила, которые модель подгружает по необходимости, как скиллы. setting_id - к какой настройке чата относится, name - имя правила, description - краткое «когда нужно» (только оно попадает в системный промпт), text - полный текст (читается инструментом read_prompt), active - показывать ли правило в списке, rank - порядок.',
                 active: true,
                 properties: {
                     actions: {
@@ -120,6 +120,9 @@ export default {
                         id: { type: 'view', class: 'gtsAIPrompt' },
                         setting_id: { label: 'Настройка чата', type: 'autocomplete', table: 'gtsAISetting', class: 'gtsAIPrompt' },
                         name: { label: 'Название', type: 'text', class: 'gtsAIPrompt' },
+                        // Описание - единственное, что модель видит без запроса.
+                        // Пишется как «когда это правило нужно», а не «о чём оно».
+                        description: { label: 'Когда нужно (кратко)', type: 'text', class: 'gtsAIPrompt' },
                         text: { label: 'Текст', type: 'textarea', truncate: 100, class: 'gtsAIPrompt' },
                         active: { label: 'Включён', type: 'boolean', class: 'gtsAIPrompt' },
                         rank: { label: 'Порядок', type: 'number', class: 'gtsAIPrompt' },
