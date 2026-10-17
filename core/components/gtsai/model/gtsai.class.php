@@ -465,6 +465,33 @@ class gtsAI
     }
 
     /**
+     * Путь к файлу, выбранному в настройке.
+     *
+     * Поле хранит то, что отдаёт браузер файлов, - адрес вида
+     * /assets/uploads/gtsapi/… Переводим его в путь на диске относительно
+     * корня сайта. Если там просто имя - значит файл из хранилища чата
+     * (так кладёт attach_file).
+     */
+    protected function settingFilePath($path)
+    {
+        $path = trim($path);
+        if ($path === '') return '';
+
+        // Полный адрес сайта - отрезаем его.
+        $base = rtrim((string)$this->modx->getOption('site_url'), '/');
+        if ($base !== '' && strpos($path, $base) === 0) $path = substr($path, strlen($base));
+
+        if (strpos($path, '/') !== false) {
+            $rel = ltrim($path, '/');
+            // ⚠️ Никаких «..»: поле правит человек, но правит через форму,
+            // и подниматься выше корня сайта ему незачем.
+            if (strpos($rel, '..') !== false) return '';
+            return MODX_BASE_PATH . $rel;
+        }
+        return $this->filesPath() . $path;
+    }
+
+    /**
      * Прикрепить последний загруженный в этом чате файл к настройке чата -
      * он станет правилом. Путь к файлу модель не видит и не должна: она
      * называет, ЧТО прикрепляем, а какой это файл, знает сервер.
@@ -576,6 +603,25 @@ class gtsAI
         ];
     }
 
+    /**
+     * Число ли это с точки зрения расчётной формы.
+     *
+     * Запятая как разделитель - наш обычный ввод («0,7»), её переводим в точку.
+     * А вот ведущий ноль («007»), длинные цифровые коды и всё, где есть буквы
+     * или знаки, остаются текстом: это артикулы и обозначения, Excel иначе
+     * съест ноль или покажет их экспонентой.
+     */
+    protected function looksNumeric($v)
+    {
+        $v = trim((string)$v);
+        if ($v === '') return false;
+        if (!preg_match('~^-?\d{1,15}([.,]\d+)?$~', str_replace(' ', '', $v))) return false;
+
+        $digits = ltrim(str_replace(['-', ' '], '', $v), '');
+        if (strlen($digits) > 1 && $digits[0] === '0' && $digits[1] !== '.' && $digits[1] !== ',') return false;
+        return true;
+    }
+
     /** Запись таблицы в xlsx. Библиотека PHPExcel уже есть в системе. */
     protected function writeSheet($full, array $rows, $sheetName = '')
     {
@@ -595,9 +641,14 @@ class gtsAI
                 if (!is_array($row)) continue;
                 $c = 0;
                 foreach ($row as $v) {
-                    // Текстом, а не числом: артикулы и размеры вида «0,7» Excel
-                    // иначе переиначит по-своему.
-                    $sheet->setCellValueExplicitByColumnAndRow($c, $r, (string)$v, PHPExcel_Cell_DataType::TYPE_STRING);
+                    $v = (string)$v;
+                    if ($this->looksNumeric($v)) {
+                        // Числом, а не текстом: этот файл вставляют в расчётную
+                        // форму, и текстовые «300» или «0,7» там не посчитаются.
+                        $sheet->setCellValueByColumnAndRow($c, $r, (float)str_replace([' ', ','], ['', '.'], $v));
+                    } else {
+                        $sheet->setCellValueExplicitByColumnAndRow($c, $r, $v, PHPExcel_Cell_DataType::TYPE_STRING);
+                    }
                     $c++;
                 }
                 $r++;
@@ -1959,8 +2010,8 @@ class gtsAI
         $f->sortby('rank', 'ASC');
         $f->sortby('id', 'ASC');
         foreach ($this->modx->getCollection('gtsAISettingFile', $f) as $row) {
-            $full = $this->filesPath() . $row->get('path');
-            if (!is_file($full)) continue;
+            $full = $this->settingFilePath((string)$row->get('path'));
+            if ($full === '' || !is_file($full)) continue;
             $rows[] = [
                 'name'        => (string)$row->get('name'),
                 'description' => trim((string)$row->get('description')),

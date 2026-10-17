@@ -147,7 +147,7 @@ export default {
             gtsAISettingFile: {
                 table: 'gtsAISettingFile',
                 class: 'gtsAISettingFile',
-                version: 1,
+                version: 2,
                 authenticated: true,
                 groups: 'Administrator',
                 ai: 1,
@@ -167,7 +167,10 @@ export default {
                         setting_id: { label: 'Настройка чата', type: 'autocomplete', table: 'gtsAISetting', class: 'gtsAISettingFile' },
                         name: { label: 'Название', type: 'text', class: 'gtsAISettingFile' },
                         description: { label: 'Когда нужно (кратко)', type: 'text', truncate: 80, class: 'gtsAISettingFile' },
-                        path: { label: 'Файл', type: 'text', readonly: 1, class: 'gtsAISettingFile' },
+                        // Выбор файла через медиа-браузер. Источник задаётся
+                        // ИМЕНЕМ системной настройки: id источника на каждой
+                        // площадке свой, и число здесь сломалось бы при переносе.
+                        path: { label: 'Файл', type: 'file', mediaSource: 'gtsai_media_source', class: 'gtsAISettingFile' },
                         size: { label: 'Размер', type: 'number', readonly: 1, class: 'gtsAISettingFile' },
                         active: { label: 'Включён', type: 'boolean', class: 'gtsAISettingFile' },
                         rank: { label: 'Порядок', type: 'number', class: 'gtsAISettingFile' },
