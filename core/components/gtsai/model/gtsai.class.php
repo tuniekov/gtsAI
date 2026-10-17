@@ -1506,9 +1506,8 @@ class gtsAI
      * Текст файла для модели. Режем по объёму: регламент на сотню страниц
      * иначе съест контекст и деньги.
      */
-    protected function textToText($file, $name)
+    protected function textToText($file, $name, $maxChars = 60000)
     {
-        $maxChars = 60000;
         $body = (string)file_get_contents($file);
         if (!mb_check_encoding($body, 'UTF-8')) {
             $body = @iconv('windows-1251', 'UTF-8//IGNORE', $body);
@@ -1548,7 +1547,7 @@ class gtsAI
      * модель такое читает без подсказок. Обрезаем по строкам и по объёму —
      * прайс на три тысячи строк иначе съел бы весь контекст и деньги.
      */
-    protected function sheetToText($file, $name)
+    protected function sheetToText($file, $name, $maxRows = 300, $maxChars = 40000)
     {
         $path = gtsAPI::phpExcelPath($this->modx);
         if (!$path) return 'Не удалось прочитать таблицу: на сайте нет библиотеки PHPExcel.';
@@ -1562,8 +1561,6 @@ class gtsAI
             return 'Не удалось прочитать таблицу «' . $name . '»: ' . $e->getMessage();
         }
 
-        $maxRows  = 300;
-        $maxChars = 40000;
         $out = [];
 
         foreach ($book->getWorksheetIterator() as $sheet) {
@@ -2054,9 +2051,13 @@ class gtsAI
             $rows[] = [
                 'name'        => $fname,
                 'description' => trim((string)$row->get('description')),
+                // ⚠️ Правило читаем целиком, без потолка в 60 000 знаков.
+                // Регламент на 144 КБ обрезался посреди раздела, и модель
+                // честно писала «регламент обрезан»: потолок тут лишний -
+                // длинное правило и так уезжает к модели частями (read_prompt).
                 'text'        => $this->isSheet($full)
-                    ? $this->sheetToText($full, $fname)
-                    : $this->textToText($full, $fname),
+                    ? $this->sheetToText($full, $fname, 5000, 2000000)
+                    : $this->textToText($full, $fname, 2000000),
             ];
         }
 
