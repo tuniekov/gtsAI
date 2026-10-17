@@ -39,7 +39,7 @@ export default {
             gtsAISetting: {
                 table: 'gtsAISetting',
                 class: 'gtsAISetting',
-                version: 6,
+                version: 7,
                 authenticated: true,
                 groups: 'Administrator',
                 // ИИ правит собственные промпты. Отдельной проверки «только
@@ -100,6 +100,7 @@ export default {
                         save_history: { label: 'Сохранять историю', type: 'boolean', class: 'gtsAISetting' },
                         max_iterations: { label: 'Макс. шагов с инструментами', type: 'number', class: 'gtsAISetting' },
                         max_seconds: { label: 'Макс. секунд на ответ', type: 'number', class: 'gtsAISetting' },
+                        max_tokens: { label: 'Макс. токенов в ответе', type: 'number', class: 'gtsAISetting' },
                         day_limit: { label: 'Лимит на юзера в день, $', type: 'decimal', FractionDigits: 2, class: 'gtsAISetting' },
                     },
                 },

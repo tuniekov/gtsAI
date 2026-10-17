@@ -54,6 +54,7 @@
         <field key="save_history" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
         <field key="max_iterations" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="10"/>
         <field key="max_seconds" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="300"/>
+        <field key="max_tokens" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="32000"/>
         <field key="day_limit" dbtype="decimal" precision="12,2" phptype="float" null="false" default="0"/>
         <index alias="name" name="name" primary="false" unique="true" type="BTREE">
             <column key="name" length="" collation="A" null="false"/>

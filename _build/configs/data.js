@@ -76,6 +76,7 @@ const chatDefault = {
     save_history: 1,
     max_iterations: 10,
     max_seconds: 300,
+    max_tokens: 32000,
     day_limit: 5,
 };
 
@@ -107,6 +108,7 @@ const chatAdmin = (prompt) => ({
     save_history: 1,
     max_iterations: 10,
     max_seconds: 300,
+    max_tokens: 32000,
     day_limit: 5,
 });
 
