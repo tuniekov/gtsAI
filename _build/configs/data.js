@@ -75,7 +75,7 @@ const chatDefault = {
     confirm_lock: 0,
     save_history: 1,
     max_iterations: 10,
-    max_seconds: 120,
+    max_seconds: 300,
     day_limit: 5,
 };
 
@@ -106,7 +106,7 @@ const chatAdmin = (prompt) => ({
     confirm_lock: 0,
     save_history: 1,
     max_iterations: 10,
-    max_seconds: 120,
+    max_seconds: 300,
     day_limit: 5,
 });
 
