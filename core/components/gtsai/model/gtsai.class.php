@@ -1238,10 +1238,11 @@ class gtsAI
         // Область работы задаёт сервер из GET страницы, модель её не заполняет.
         $scope    = $this->scopeFromRequest($request);
 
-        $answerAll = '';
-        $usedTools = [];
-        $failed    = '';
-        $stop      = '';
+        $answerAll   = '';
+        $usedTools   = [];
+        $failed      = '';
+        $stop        = '';
+        $emptyAnswer = false;
         $iteration = 0;
         // Всё, что добавится в $messages дальше, - шаги этого хода: пары
         // «запрос инструмента - результат». Их и сохраним вместе с ответом.
@@ -1300,7 +1301,10 @@ class gtsAI
                 $usedTools[] = $call['name'];
                 $this->sse('tool', ['name' => $call['name'], 'input' => $call['input']]);
 
-                $result = $this->runTool($call['name'], (array)$call['input'], $scope);
+                $result = !empty($call['broken'])
+                    ? ['error' => 'Аргументы вызова оборвались: ответ упёрся в предел длины. '
+                        . 'Повтори вызов с более коротким содержимым (например, разбей файл на части).']
+                    : $this->runTool($call['name'], (array)$call['input'], $scope);
                 $result = $this->capResult($result);
                 $results[] = [
                     'type'        => 'tool_result',
@@ -1324,6 +1328,21 @@ class gtsAI
             $answerAll .= $note;
         }
 
+        // Пустой ответ выглядит как зависший чат: видны вызовы инструментов, а
+        // под ними ничего. Так бывает, когда модель упёрлась в предел длины
+        // ответа посреди вызова - текста она написать не успела, а вызов не
+        // доехал. Объясняем это прямо в чате, а не оставляем пустой пузырь.
+        if (trim($answerAll) === '' && !$failed) {
+            $note = $stop === 'max_tokens'
+                ? '_Ответ оборвался: модель упёрлась в предел длины одного ответа. '
+                    . 'Попросите её работать по шагам или меньшими кусками._'
+                : '_Модель не прислала ответ' . ($stop !== '' ? ' (остановка: ' . $stop . ')' : '') . '. Повторите запрос._';
+            $this->sse('delta', ['text' => $note]);
+            $answerAll .= $note;
+            if ($failed === '') $failed = 'пустой ответ, остановка: ' . ($stop !== '' ? $stop : 'неизвестно');
+            $emptyAnswer = true;
+        }
+
         $usage = $provider->getUsage();
         $this->saveMessage(
             $chat,
@@ -1333,7 +1352,11 @@ class gtsAI
             [],
             array_slice($messages, $turnStart)
         );
-        $this->writeLog($chat, $usage, $started, $failed ? 'error' : 'ok', $failed, $usedTools, min($iteration, $maxIter));
+        $this->writeLog(
+            $chat, $usage, $started,
+            ($failed !== '' && empty($emptyAnswer)) ? 'error' : 'ok',
+            $failed, $usedTools, min($iteration, $maxIter)
+        );
 
         $this->turnDone = true;
         $this->sse('done', ['stop_reason' => $stop, 'chat_id' => $chat ? (int)$chat->id : 0]);
@@ -1898,8 +1921,13 @@ class gtsAI
             $prompt .= "\n\nДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА (подгружай инструментом read_prompt по имени,"
                 . " когда правило относится к задаче; содержание по названию не угадывай):";
             foreach ($extras as $extra) {
+                // Число частей показываем сразу: регламент на сотню страниц
+                // приходит кусками, и модель должна понимать это до вызова,
+                // а не удивляться обрыву на первой части.
+                $parts = count($this->splitForTool((string)$extra['text']));
                 $prompt .= "\n- " . $extra['name']
-                    . ($extra['description'] !== '' ? ': ' . $extra['description'] : '');
+                    . ($extra['description'] !== '' ? ': ' . $extra['description'] : '')
+                    . ($parts > 1 ? ' [частей: ' . $parts . ']' : '');
             }
         }
 
