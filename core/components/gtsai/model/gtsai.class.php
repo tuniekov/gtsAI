@@ -2012,10 +2012,16 @@ class gtsAI
         foreach ($this->modx->getCollection('gtsAISettingFile', $f) as $row) {
             $full = $this->settingFilePath((string)$row->get('path'));
             if ($full === '' || !is_file($full)) continue;
+            // xlsx/csv разбираем в текст, а не отдаём двоичным: именно так
+            // к чату прикладывают шаблон заявки, и модели нужны заголовки
+            // листа, а не «файл читается как двоичные данные».
+            $fname = (string)$row->get('name');
             $rows[] = [
-                'name'        => (string)$row->get('name'),
+                'name'        => $fname,
                 'description' => trim((string)$row->get('description')),
-                'text'        => $this->textToText($full, (string)$row->get('name')),
+                'text'        => $this->isSheet($full)
+                    ? $this->sheetToText($full, $fname)
+                    : $this->textToText($full, $fname),
             ];
         }
 
@@ -2034,11 +2040,13 @@ class gtsAI
             'name'         => 'read_prompt',
             'description'  =>
                 'Прочитать полный текст дополнительного правила по имени. Имена и краткие описания перечислены в системном промпте.' . "\n" .
-                'Зови, когда правило относится к задаче: содержание по названию не угадывай.',
+                'Зови, когда правило относится к задаче: содержание по названию не угадывай.' . "\n" .
+                'Длинное правило приходит частями: в ответе будут part и parts, следующую часть бери тем же инструментом с part=N+1.',
             'input_schema' => [
                 'type'       => 'object',
                 'properties' => [
                     'name' => ['type' => 'string', 'description' => 'Имя правила из списка'],
+                    'part' => ['type' => 'integer', 'description' => 'Номер части для длинного правила, по умолчанию 1'],
                 ],
                 'required'   => ['name'],
             ],
@@ -2051,13 +2059,93 @@ class gtsAI
         $name = isset($input['name']) ? trim((string)$input['name']) : '';
         if ($name === '') return ['error' => 'Не указано имя правила.'];
 
-        foreach ($this->extraPrompts() as $extra) {
-            if (mb_strtolower($extra['name']) === mb_strtolower($name)) {
-                return ['name' => $extra['name'], 'text' => $extra['text']];
-            }
+        $extras = $this->extraPrompts();
+        $found = null;
+        foreach ($extras as $extra) {
+            if ($this->sameName($extra['name'], $name)) { $found = $extra; break; }
         }
-        return ['error' => 'Такого правила нет. Есть: '
-            . implode(', ', array_column($this->extraPrompts(), 'name')) . '.'];
+        // Запасной заход: имя-начало. Имена правил бывают длинные, и модель
+        // обрезает хвост или дописывает лишнее - из-за одного символа гонять
+        // её по списку заново незачем.
+        if (!$found) {
+            $hits = [];
+            foreach ($extras as $extra) {
+                $a = $this->normName($extra['name']);
+                $b = $this->normName($name);
+                if ($b !== '' && (strpos($a, $b) === 0 || strpos($b, $a) === 0)) $hits[] = $extra;
+            }
+            if (count($hits) === 1) $found = $hits[0];
+        }
+
+        if (!$found) {
+            return ['error' => 'Такого правила нет. Есть: '
+                . implode(', ', array_column($extras, 'name')) . '.'];
+        }
+
+        // Длинный регламент отдаём частями: целиком он не влезает в потолок
+        // ответа инструмента, и раньше модель получала «Ответ слишком большой»
+        // без единого способа дочитать.
+        $parts = $this->splitForTool((string)$found['text']);
+        $total = count($parts);
+        $n = isset($input['part']) ? (int)$input['part'] : 1;
+        if ($n < 1) $n = 1;
+        if ($n > $total) return ['error' => 'У правила «' . $found['name'] . '» всего частей: ' . $total . '.'];
+
+        $out = ['name' => $found['name'], 'text' => $parts[$n - 1]];
+        if ($total > 1) {
+            $out['part']  = $n;
+            $out['parts'] = $total;
+            $out['hint']  = $n < $total
+                ? 'Это часть ' . $n . ' из ' . $total . '. Дальше: read_prompt с part=' . ($n + 1) . '.'
+                : 'Это последняя часть (' . $n . ' из ' . $total . ').';
+        }
+        return $out;
+    }
+
+    /** Имя правила для сравнения: без краёв, без лишних пробелов, в нижнем регистре. */
+    protected function normName($v)
+    {
+        $v = preg_replace('~\s+~u', ' ', (string)$v);
+        return mb_strtolower(trim((string)$v), 'UTF-8');
+    }
+
+    /**
+     * Одно ли это имя.
+     *
+     * ⚠️ Сравниваем по нормализованному виду: в названии правила легко
+     * заводится хвостовой пробел, и тогда точное сравнение не находит его
+     * ни с пробелом (модель его не напишет), ни без него.
+     */
+    protected function sameName($a, $b)
+    {
+        return $this->normName($a) === $this->normName($b);
+    }
+
+    /**
+     * Нарезка длинного текста под потолок ответа инструмента (capResult).
+     * Режем по строкам, чтобы таблица или список не рвались посередине.
+     */
+    protected function splitForTool($text, $limit = 28000)
+    {
+        if (strlen($text) <= $limit) return [$text];
+
+        $parts = [];
+        $buf = '';
+        foreach (explode("\n", $text) as $line) {
+            // Одна строка длиннее куска - режем её саму, иначе кусок не закроется.
+            while (strlen($line) > $limit) {
+                if ($buf !== '') { $parts[] = $buf; $buf = ''; }
+                $parts[] = substr($line, 0, $limit);
+                $line = substr($line, $limit);
+            }
+            if ($buf !== '' && strlen($buf) + strlen($line) + 1 > $limit) {
+                $parts[] = $buf;
+                $buf = '';
+            }
+            $buf .= ($buf === '' ? '' : "\n") . $line;
+        }
+        if ($buf !== '') $parts[] = $buf;
+        return $parts;
     }
 
     /* ------------------------------------------------------------------ *
