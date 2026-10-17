@@ -112,6 +112,7 @@ class gtsAI
             case 'message':  return $this->actionMessage($request);
             case 'models':   return $this->actionModels($request);
             case 'upload':   return $this->actionUpload($request);
+            case 'file':     return $this->actionFile($id);
             case 'apply':    return $this->actionApply($request);
             case 'rollback': return $this->actionRollback($request);
         }
@@ -361,7 +362,7 @@ class gtsAI
                     'required'   => ['table'],
                 ],
             ],
-        ], $this->actionToolDefs(), $this->promptToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
+        ], $this->actionToolDefs(), $this->promptToolDefs(), $this->fileToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
     }
 
     /**
@@ -401,6 +402,9 @@ class gtsAI
         $action = isset($input['action']) ? (string)$input['action'] : '';
         if ($table === '' || $action === '') return ['error' => 'Нужны table и action.'];
 
+        $deny = $this->tableAllowed($table);
+        if ($deny !== '') return ['error' => $deny];
+
         $params = isset($input['params']) && is_array($input['params']) ? $input['params'] : [];
         // Область работы задаёт сервер - так же, как в чтении и записи.
         foreach ($scope as $k => $v) $params[$k] = $v;
@@ -411,6 +415,199 @@ class gtsAI
                 ? $resp['message'] : 'Действие не выполнено.'];
         }
         return isset($resp['data']) ? $resp['data'] : $resp;
+    }
+
+    /**
+     * Инструмент выдачи файла. Модель готовит содержимое, сервер кладёт его в
+     * хранилище чата и отдаёт ссылку на скачивание.
+     *
+     * Зачем: результат разбора заявки Олег забирает ФАЙЛОМ - листом «вставка»,
+     * который копируется в расчётную форму. Пересказ таблицы в чате для этого
+     * бесполезен, нужен именно файл.
+     */
+    protected function fileToolDefs()
+    {
+        return [[
+            'name'         => 'save_file',
+            'description'  =>
+                'Сохранить файл и дать пользователю ссылку на скачивание.' . "\n" .
+                'format: xlsx - таблица (передай rows: массив строк, каждая строка - массив значений; первая строка обычно заголовки), md/txt/csv - текст (передай text).' . "\n" .
+                'Для разбора заявки собирай xlsx: заголовки первой строкой, дальше данные.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'name'   => ['type' => 'string', 'description' => 'Имя файла без расширения'],
+                    'format' => ['type' => 'string', 'description' => 'xlsx, csv, md или txt'],
+                    'text'   => ['type' => 'string', 'description' => 'Содержимое для md, txt и csv'],
+                    'rows'   => [
+                        'type'        => 'array',
+                        'items'       => ['type' => 'array', 'items' => ['type' => 'string']],
+                        'description' => 'Строки таблицы для xlsx',
+                    ],
+                    'sheet'  => ['type' => 'string', 'description' => 'Имя листа для xlsx, по умолчанию «вставка»'],
+                ],
+                'required'   => ['name', 'format'],
+            ],
+        ], [
+            'name'         => 'attach_file',
+            'description'  =>
+                'Прикрепить последний загруженный в этом чате текстовый файл к настройке чата - он станет правилом.' . "\n" .
+                'Так правила правят снаружи: выгрузил промпт файлом через save_file, поправил у себя, приложил обратно и прикрепил.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'name'        => ['type' => 'string', 'description' => 'Как назвать правило'],
+                    'description' => ['type' => 'string', 'description' => 'Когда это правило нужно - одной строкой'],
+                ],
+                'required'   => ['name'],
+            ],
+        ]];
+    }
+
+    /**
+     * Прикрепить последний загруженный в этом чате файл к настройке чата -
+     * он станет правилом. Путь к файлу модель не видит и не должна: она
+     * называет, ЧТО прикрепляем, а какой это файл, знает сервер.
+     */
+    protected function attachFile(array $input)
+    {
+        if (empty($this->setting['allow_prompt_edit'])) {
+            return ['error' => 'Правка собственных промптов в этом чате запрещена настройкой.'];
+        }
+        $deny = $this->tableAllowed('gtsAISettingFile', true);
+        if ($deny !== '') return ['error' => $deny];
+
+        $name = trim((string)(isset($input['name']) ? $input['name'] : ''));
+        if ($name === '') return ['error' => 'Нужно имя правила.'];
+
+        $c = $this->modx->newQuery('gtsAIFile');
+        $c->where(['user_id' => $this->modx->user->id]);
+        if ($this->chat) $c->where(['chat_id' => $this->chat->id]);
+        $c->sortby('id', 'DESC');
+        $c->limit(1);
+        $file = $this->modx->getObject('gtsAIFile', $c);
+        if (!$file) return ['error' => 'В этом чате нет загруженного файла.'];
+
+        $ext = strtolower(pathinfo((string)$file->get('name'), PATHINFO_EXTENSION));
+        if (!in_array($ext, $this->textExtensions(), true)) {
+            return ['error' => 'Правилом может стать только текстовый файл (' . implode(', ', $this->textExtensions()) . '), а это ' . $ext . '.'];
+        }
+
+        $row = $this->modx->getObject('gtsAISettingFile', [
+            'setting_id' => (int)$this->setting['id'],
+            'name'       => $name,
+        ]);
+        if (!$row) {
+            $row = $this->modx->newObject('gtsAISettingFile', [
+                'setting_id' => (int)$this->setting['id'],
+                'name'       => $name,
+                'createdon'  => date('Y-m-d H:i:s'),
+                'active'     => 1,
+                'rank'       => 0,
+            ]);
+        }
+        $row->set('description', trim((string)(isset($input['description']) ? $input['description'] : '')));
+        $row->set('path', $file->get('path'));
+        $row->set('size', (int)$file->get('size'));
+        if (!$row->save()) return ['error' => 'Не удалось прикрепить файл.'];
+
+        return [
+            'attached' => $name,
+            'file'     => $file->get('name'),
+            'note'     => 'Файл стал правилом настройки «' . $this->setting['name'] . '»: его текст будет подгружаться по имени.',
+        ];
+    }
+
+    /** Сохранить файл и вернуть ссылку. */
+    protected function saveFile(array $input)
+    {
+        $format = strtolower(trim((string)(isset($input['format']) ? $input['format'] : '')));
+        $known  = ['xlsx', 'csv', 'md', 'txt'];
+        if (!in_array($format, $known, true)) {
+            return ['error' => 'Формат должен быть одним из: ' . implode(', ', $known) . '.'];
+        }
+
+        $base = trim((string)(isset($input['name']) ? $input['name'] : ''));
+        $base = preg_replace('~[\\\\/:*?"<>|]+~u', '_', $base);
+        $base = trim((string)$base, " .");
+        if ($base === '') $base = 'файл';
+        $base = mb_substr($base, 0, 80);
+
+        $stored = date('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8) . '.' . $format;
+        $full   = $this->filesPath() . $stored;
+
+        if ($format === 'xlsx') {
+            $rows = isset($input['rows']) && is_array($input['rows']) ? $input['rows'] : [];
+            if (!$rows) return ['error' => 'Для xlsx нужны rows - строки таблицы.'];
+            $err = $this->writeSheet($full, $rows, isset($input['sheet']) ? (string)$input['sheet'] : '');
+            if ($err !== '') return ['error' => $err];
+        } else {
+            $text = isset($input['text']) ? (string)$input['text'] : '';
+            if ($text === '') return ['error' => 'Для ' . $format . ' нужен text.'];
+            if (strlen($text) > 2 * 1024 * 1024) return ['error' => 'Файл больше 2 МБ - слишком много.'];
+            // ⚠️ BOM у csv: без него Excel на Windows открывает кириллицу кракозябрами.
+            if ($format === 'csv') $text = "\xEF\xBB\xBF" . $text;
+            if (@file_put_contents($full, $text) === false) {
+                return ['error' => 'Не удалось сохранить файл.'];
+            }
+        }
+
+        $name = $base . '.' . $format;
+        $row  = $this->modx->newObject('gtsAIFile', [
+            'chat_id'   => $this->chat ? $this->chat->id : 0,
+            'user_id'   => $this->modx->user->id,
+            'name'      => $name,
+            'path'      => $stored,
+            'size'      => (int)@filesize($full),
+            'mime'      => $format === 'xlsx'
+                ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                : ($format === 'csv' ? 'text/csv' : 'text/markdown'),
+            'createdon' => date('Y-m-d H:i:s'),
+        ]);
+        $row->save();
+
+        $url = $this->modx->getOption('site_url') . 'gtsai/file/' . (int)$row->id;
+        $this->sse('file', ['id' => (int)$row->id, 'name' => $name, 'url' => $url, 'size' => (int)$row->get('size')]);
+
+        return [
+            'saved' => $name,
+            'url'   => $url,
+            'note'  => 'Ссылка уже показана пользователю в чате - повторять её текстом не нужно.',
+        ];
+    }
+
+    /** Запись таблицы в xlsx. Библиотека PHPExcel уже есть в системе. */
+    protected function writeSheet($full, array $rows, $sheetName = '')
+    {
+        $path = gtsAPI::phpExcelPath($this->modx);
+        if (!$path) return 'На сайте нет библиотеки PHPExcel - xlsx собрать нечем.';
+        require_once $path . 'PHPExcel.php';
+
+        if (count($rows) > 5000) return 'Больше 5000 строк за раз нельзя.';
+
+        try {
+            $book = new PHPExcel();
+            $sheet = $book->getActiveSheet();
+            $sheet->setTitle($sheetName !== '' ? mb_substr($sheetName, 0, 31) : 'вставка');
+
+            $r = 1;
+            foreach ($rows as $row) {
+                if (!is_array($row)) continue;
+                $c = 0;
+                foreach ($row as $v) {
+                    // Текстом, а не числом: артикулы и размеры вида «0,7» Excel
+                    // иначе переиначит по-своему.
+                    $sheet->setCellValueExplicitByColumnAndRow($c, $r, (string)$v, PHPExcel_Cell_DataType::TYPE_STRING);
+                    $c++;
+                }
+                $r++;
+            }
+            $writer = PHPExcel_IOFactory::createWriter($book, 'Excel2007');
+            $writer->save($full);
+        } catch (\Throwable $e) {
+            return 'Не удалось собрать xlsx: ' . $e->getMessage();
+        }
+        return '';
     }
 
     /**
@@ -628,11 +825,19 @@ class gtsAI
                 $request = array_intersect_key($input, array_flip([
                     'filters', 'sortField', 'sortOrder', 'multiSortMeta', 'limit', 'offset', 'ids', 'query',
                 ]));
+                $deny = $this->tableAllowed(isset($input['table']) ? $input['table'] : '');
+                if ($deny !== '') return ['error' => $deny];
                 $readAction = isset($input['action']) ? (string)$input['action'] : 'read';
                 return $this->bridge->read($table, $request, $scope, $fields, $readAction);
 
             case 'run_action':
                 return $this->capResult($this->runAction($input, $scope));
+
+            case 'save_file':
+                return $this->saveFile($input);
+
+            case 'attach_file':
+                return $this->attachFile($input);
 
             case 'read_prompt':
                 return $this->readPrompt($input);
@@ -669,6 +874,8 @@ class gtsAI
         if ($table === '' || $action === '' || !$rows) {
             return ['error' => 'Нужны table, action и rows.'];
         }
+        $deny = $this->tableAllowed($table, true);
+        if ($deny !== '') return ['error' => $deny];
         if (count($rows) > 100) {
             return ['error' => 'Больше 100 строк за раз нельзя. Раздели на части.'];
         }
@@ -1188,6 +1395,50 @@ class gtsAI
         ];
     }
 
+    /**
+     * Какие расширения можно прикладывать в этом чате.
+     *
+     * ⚠️ По типу содержимого судить нельзя: .md и .csv приходят как
+     * text/plain, а .xlsx - как application/zip. Поэтому решает расширение,
+     * а список лежит в настройке чата (пусто - значения по умолчанию).
+     */
+    protected function allowedExts()
+    {
+        $raw = isset($this->setting['file_exts']) ? trim((string)$this->setting['file_exts']) : '';
+        if ($raw === '') $raw = 'pdf,xlsx,xlsm,xls,csv,txt,md,png,jpg,jpeg,webp,gif';
+
+        $out = [];
+        foreach (explode(',', $raw) as $e) {
+            $e = strtolower(trim($e, " \t."));
+            if ($e !== '') $out[$e] = true;
+        }
+        return $out;
+    }
+
+    /** Текстовые файлы, которые просто читаем и отдаём модели как текст. */
+    protected function textExtensions()
+    {
+        return ['txt', 'md', 'markdown', 'json', 'xml', 'yml', 'yaml', 'log'];
+    }
+
+    /**
+     * Текст файла для модели. Режем по объёму: регламент на сотню страниц
+     * иначе съест контекст и деньги.
+     */
+    protected function textToText($file, $name)
+    {
+        $maxChars = 60000;
+        $body = (string)file_get_contents($file);
+        if (!mb_check_encoding($body, 'UTF-8')) {
+            $body = @iconv('windows-1251', 'UTF-8//IGNORE', $body);
+        }
+        $body = (string)$body;
+        if (mb_strlen($body) > $maxChars) {
+            $body = mb_substr($body, 0, $maxChars) . "\n…(файл обрезан)";
+        }
+        return "Файл «" . $name . "»:\n" . $body;
+    }
+
     /** Расширения таблиц: их читаем сами. */
     protected function sheetExtensions()
     {
@@ -1270,6 +1521,43 @@ class gtsAI
     }
 
     /**
+     * Отдать файл на скачивание.
+     *
+     * Файлы лежат вне веб-корня, поэтому прямой ссылки на них нет и быть не
+     * должно: отдаём через шлюз и только тому, чей это файл (или админу) -
+     * иначе номер в ссылке сам становится ключом ко всем чужим выгрузкам.
+     */
+    protected function actionFile($id)
+    {
+        $id = (int)$id;
+        if (!$id) return $this->error('Не указан файл.');
+
+        $row = $this->modx->getObject('gtsAIFile', $id);
+        if (!$row) return $this->error('Файл не найден.');
+
+        $mine  = (int)$row->get('user_id') === (int)$this->modx->user->id;
+        $admin = (bool)$this->modx->user->isMember(['Administrator']);
+        if (!$mine && !$admin) return $this->error('Это чужой файл.');
+
+        $full = $this->filesPath() . $row->get('path');
+        if (!is_file($full)) return $this->error('Файла больше нет на диске.');
+
+        $name = (string)$row->get('name');
+        $mime = (string)$row->get('mime');
+
+        while (ob_get_level() > 0) ob_end_clean();
+        header('Content-Type: ' . ($mime !== '' ? $mime : 'application/octet-stream'));
+        header('Content-Length: ' . filesize($full));
+        // Имя латиницей для старых клиентов + filename* с юникодом: иначе
+        // кириллица в имени превращается в вопросительные знаки.
+        $ascii = preg_replace('~[^A-Za-z0-9._-]+~', '_', $name);
+        header('Content-Disposition: attachment; filename="' . $ascii . '"; filename*=UTF-8\'\'' . rawurlencode($name));
+        header('X-Content-Type-Options: nosniff');
+        readfile($full);
+        exit();
+    }
+
+    /**
      * Загрузка файла или снимка экрана.
      *
      * Файл кладётся сразу, ещё до отправки сообщения: так виджет показывает
@@ -1290,16 +1578,29 @@ class gtsAI
             return $this->error('Файл больше 8 МБ — столько в запрос к модели не поместится.');
         }
 
-        // Тип определяем по содержимому, а не по присланному имени.
         $mime = function_exists('mime_content_type') ? mime_content_type($file['tmp_name']) : $file['type'];
         $allowed = $this->allowedMime();
         $sheet   = $this->isSheet($file['name'], $mime);
 
-        if (!$sheet && !isset($allowed[$mime])) {
-            return $this->error('Такой тип файла не прочитать: ' . $mime
-                . '. Подойдут изображение, PDF, Excel или CSV.');
+        // ⚠️ Решает РАСШИРЕНИЕ, а не тип по содержимому: .md и .csv приходят
+        // как text/plain, .xlsx - как application/zip. Раньше проверка шла по
+        // типу, и markdown отбивался «такой тип файла не прочитать», хотя
+        // читать его проще всего. Список расширений - в настройке чата.
+        $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+        if ($ext === '' && isset($allowed[$mime])) $ext = $allowed[$mime];
+        if ($ext === 'jpeg') $ext = 'jpg';
+
+        $exts = $this->allowedExts();
+        if ($ext === '' || !isset($exts[$ext])) {
+            return $this->error('Файлы «' . ($ext !== '' ? $ext : $mime) . '» в этом чате не принимаются. '
+                . 'Разрешены: ' . implode(', ', array_keys($exts)) . '.');
         }
-        $ext = $sheet ? $sheet : $allowed[$mime];
+        // Картинку и PDF модель читает сама - для них тип всё же проверяем:
+        // подменённое расширение иначе уехало бы ей как изображение.
+        $native = ['png', 'jpg', 'webp', 'gif', 'pdf'];
+        if (in_array($ext, $native, true) && !isset($allowed[$mime])) {
+            return $this->error('Содержимое файла не похоже на ' . $ext . ' (определено как ' . $mime . ').');
+        }
 
         // ⚠️ Разделитель ~, а не /: слеш внутри класса символов закрывал сам
         // шаблон («Unknown modifier»), preg_replace возвращал null, и ЛЮБОЕ
@@ -1377,6 +1678,16 @@ class gtsAI
             }
 
             $data = base64_encode(file_get_contents($full));
+
+            // Текст и markdown уходят моделью как текст - читать их нечем,
+            // кроме как прочитать.
+            if (in_array(strtolower(pathinfo($name, PATHINFO_EXTENSION)), $this->textExtensions(), true)) {
+                $blocks[] = [
+                    'type' => 'text',
+                    'text' => $this->textToText($full, $name),
+                ];
+                continue;
+            }
 
             if ($mime === 'application/pdf') {
                 $blocks[] = [
@@ -1577,6 +1888,49 @@ class gtsAI
         return $step;
     }
 
+    /** Таблицы настроек чата: их правка - это правка собственных промптов. */
+    protected function promptTables()
+    {
+        return ['gtsAISetting', 'gtsAIPrompt', 'gtsAISettingFile'];
+    }
+
+    /**
+     * Можно ли этому чату работать с таблицей.
+     *
+     * Два списка в настройке чата: белый (пусто - все, у кого стоит флаг ai)
+     * и чёрный, который сильнее белого. Поверх - отдельный рубильник на
+     * правку собственных промптов: мало того, что таблицы настроек открыты
+     * флагом ai, чат должен быть ещё и явно на это уполномочен. Права
+     * пользователя при этом никуда не деваются - они потолок в любом случае.
+     */
+    protected function tableAllowed($table, $write = false)
+    {
+        $table = (string)$table;
+
+        $list = function ($key) {
+            $raw = isset($this->setting[$key]) ? (string)$this->setting[$key] : '';
+            return array_filter(array_map('trim', explode(',', $raw)));
+        };
+
+        foreach ($list('tables_deny') as $t) {
+            if (strcasecmp($t, $table) === 0) return 'Таблица ' . $table . ' закрыта для этого чата.';
+        }
+        $allow = $list('tables_allow');
+        if ($allow) {
+            $ok = false;
+            foreach ($allow as $t) if (strcasecmp($t, $table) === 0) { $ok = true; break; }
+            if (!$ok) {
+                return 'Этому чату разрешены только: ' . implode(', ', $allow) . '.';
+            }
+        }
+
+        if ($write && in_array($table, $this->promptTables(), true)
+            && empty($this->setting['allow_prompt_edit'])) {
+            return 'Правка собственных промптов в этом чате запрещена настройкой.';
+        }
+        return '';
+    }
+
     /** Доппромпты настройки по порядку. Выключенные пропускаем. */
     protected function extraPrompts()
     {
@@ -1596,6 +1950,24 @@ class gtsAI
                 'text'        => (string)$row->get('text'),
             ];
         }
+
+        // Правила, которые лежат файлами. Для модели это то же самое правило:
+        // имя, «когда нужно» и текст. Разница только в том, где текст хранится -
+        // в поле или в файле, который удобнее править снаружи.
+        $f = $this->modx->newQuery('gtsAISettingFile');
+        $f->where(['setting_id' => (int)$this->setting['id'], 'active' => 1]);
+        $f->sortby('rank', 'ASC');
+        $f->sortby('id', 'ASC');
+        foreach ($this->modx->getCollection('gtsAISettingFile', $f) as $row) {
+            $full = $this->filesPath() . $row->get('path');
+            if (!is_file($full)) continue;
+            $rows[] = [
+                'name'        => (string)$row->get('name'),
+                'description' => trim((string)$row->get('description')),
+                'text'        => $this->textToText($full, (string)$row->get('name')),
+            ];
+        }
+
         return $this->extras = $rows;
     }
 

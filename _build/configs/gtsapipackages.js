@@ -39,7 +39,7 @@ export default {
             gtsAISetting: {
                 table: 'gtsAISetting',
                 class: 'gtsAISetting',
-                version: 5,
+                version: 6,
                 authenticated: true,
                 groups: 'Administrator',
                 // ИИ правит собственные промпты. Отдельной проверки «только
@@ -59,6 +59,11 @@ export default {
                                 gtsAIPrompt: {
                                     title: 'Доппромпты',
                                     table: 'gtsAIPrompt',
+                                    where: { setting_id: 'id' },
+                                },
+                                gtsAISettingFile: {
+                                    title: 'Файлы',
+                                    table: 'gtsAISettingFile',
                                     where: { setting_id: 'id' },
                                 },
                             },
@@ -86,6 +91,12 @@ export default {
                         allow_write: { label: 'Разрешить запись (что именно — в конфиге таблиц)', type: 'boolean', class: 'gtsAISetting' },
                         confirm_write: { label: 'Спрашивать подтверждение (по умолчанию)', type: 'boolean', class: 'gtsAISetting' },
                         confirm_lock: { label: 'Запретить выключать подтверждение в чате', type: 'boolean', class: 'gtsAISetting' },
+                        // Рубильник на правку собственных промптов: мало открыть
+                        // таблицы настроек, чат должен быть уполномочен явно.
+                        allow_prompt_edit: { label: 'Разрешить править свои промпты', type: 'boolean', class: 'gtsAISetting' },
+                        tables_allow: { label: 'Только эти таблицы (через запятую)', type: 'text', truncate: 60, class: 'gtsAISetting' },
+                        tables_deny: { label: 'Запрещённые таблицы (через запятую)', type: 'text', truncate: 60, class: 'gtsAISetting' },
+                        file_exts: { label: 'Расширения файлов (пусто — по умолчанию)', type: 'text', truncate: 60, class: 'gtsAISetting' },
                         save_history: { label: 'Сохранять историю', type: 'boolean', class: 'gtsAISetting' },
                         max_iterations: { label: 'Макс. шагов с инструментами', type: 'number', class: 'gtsAISetting' },
                         max_seconds: { label: 'Макс. секунд на ответ', type: 'number', class: 'gtsAISetting' },
@@ -126,6 +137,41 @@ export default {
                         text: { label: 'Текст', type: 'textarea', truncate: 100, class: 'gtsAIPrompt' },
                         active: { label: 'Включён', type: 'boolean', class: 'gtsAIPrompt' },
                         rank: { label: 'Порядок', type: 'number', class: 'gtsAIPrompt' },
+                    },
+                },
+            },
+
+            // Файлы, прикреплённые к настройке чата. Текст файла работает как
+            // доппромпт: директору удобнее править правила в файле и вернуть
+            // его обратно, чем печатать в поле формы.
+            gtsAISettingFile: {
+                table: 'gtsAISettingFile',
+                class: 'gtsAISettingFile',
+                version: 1,
+                authenticated: true,
+                groups: 'Administrator',
+                ai: 1,
+                description: 'Файлы, прикреплённые к настройке чата. setting_id - настройка, name - как правило называется, description - когда оно нужно, path - имя файла в хранилище чата, active - подставлять ли. Текст файла читается как доппромпт.',
+                active: true,
+                properties: {
+                    actions: {
+                        read: { ai: 1 },
+                        create: {},
+                        update: { ai: 1 },
+                        delete: {},
+                    },
+                    save_version_row: true,
+                    query: { sortby: { 'gtsAISettingFile.rank': 'ASC', 'gtsAISettingFile.id': 'ASC' } },
+                    fields: {
+                        id: { type: 'view', class: 'gtsAISettingFile' },
+                        setting_id: { label: 'Настройка чата', type: 'autocomplete', table: 'gtsAISetting', class: 'gtsAISettingFile' },
+                        name: { label: 'Название', type: 'text', class: 'gtsAISettingFile' },
+                        description: { label: 'Когда нужно (кратко)', type: 'text', truncate: 80, class: 'gtsAISettingFile' },
+                        path: { label: 'Файл', type: 'text', readonly: 1, class: 'gtsAISettingFile' },
+                        size: { label: 'Размер', type: 'number', readonly: 1, class: 'gtsAISettingFile' },
+                        active: { label: 'Включён', type: 'boolean', class: 'gtsAISettingFile' },
+                        rank: { label: 'Порядок', type: 'number', class: 'gtsAISettingFile' },
+                        createdon: { label: 'Добавлен', type: 'date', readonly: 1, class: 'gtsAISettingFile' },
                     },
                 },
             },

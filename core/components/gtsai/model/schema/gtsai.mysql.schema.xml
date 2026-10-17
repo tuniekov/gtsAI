@@ -40,12 +40,41 @@
         <!-- Запретить человеку выключать подтверждение в самом чате. Нужен там,
              где правки важные: иначе переключатель в чате сильнее настройки. -->
         <field key="confirm_lock" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- Правка собственных промптов. Мало открыть таблицы настроек: это
+             рубильник на уровне чата. Права пользователя при этом остаются
+             потолком - без них правка не пройдёт и при включённом флаге. -->
+        <field key="allow_prompt_edit" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <!-- Белый и чёрный списки таблиц gtsAPI через запятую. Пусто в белом -
+             доступны все, у кого стоит флаг ai. Чёрный сильнее белого. -->
+        <field key="tables_allow" dbtype="varchar" precision="1024" phptype="string" null="true" default=""/>
+        <field key="tables_deny" dbtype="varchar" precision="1024" phptype="string" null="true" default=""/>
+        <!-- Какие файлы можно прикладывать в этом чате, расширения через
+             запятую. Пусто - список по умолчанию из кода. -->
+        <field key="file_exts" dbtype="varchar" precision="255" phptype="string" null="true" default=""/>
         <field key="save_history" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
         <field key="max_iterations" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="10"/>
         <field key="max_seconds" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="120"/>
         <field key="day_limit" dbtype="decimal" precision="12,2" phptype="float" null="false" default="0"/>
         <index alias="name" name="name" primary="false" unique="true" type="BTREE">
             <column key="name" length="" collation="A" null="false"/>
+        </index>
+    </object>
+
+    <!-- Файлы, прикреплённые к настройке чата: промпт, выгруженный в файл и
+         поправленный снаружи, регламенты, шаблоны. Текст файла подставляется
+         как правило - так же, как доппромпт, только источник не поле в базе,
+         а файл в медиа-источнике. -->
+    <object class="gtsAISettingFile" table="gtsai_setting_files" extends="xPDOSimpleObject">
+        <field key="setting_id" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="name" dbtype="varchar" precision="191" phptype="string" null="false" default=""/>
+        <field key="description" dbtype="varchar" precision="255" phptype="string" null="true" default=""/>
+        <field key="path" dbtype="varchar" precision="255" phptype="string" null="false" default=""/>
+        <field key="size" dbtype="int" precision="10" attributes="unsigned" phptype="integer" null="false" default="0"/>
+        <field key="active" dbtype="tinyint" precision="1" attributes="unsigned" phptype="integer" null="false" default="1"/>
+        <field key="rank" dbtype="int" precision="10" phptype="integer" null="false" default="0"/>
+        <field key="createdon" dbtype="datetime" phptype="datetime" null="true"/>
+        <index alias="setting_id" name="setting_id" primary="false" unique="false" type="BTREE">
+            <column key="setting_id" length="" collation="A" null="false"/>
         </index>
     </object>
 
