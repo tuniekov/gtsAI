@@ -174,7 +174,7 @@ export default {
         '- modx_tsklad_status — статусы заказов: 1 в производстве, 2 изготовлен,',
         '  3 отгружен, 4 ОТМЕНЁН, 5 на складе. Статус лежит у заказа',
         '  (tsklad_orders.status_id), в отчёте его нет.',
-        '- modx_tsklad_detail_naryad_smena_link — наряды по деталям: det_id,',
+        '- modx_gtscraft_naryad_links — наряды по деталям: det_id,',
         '  naryad_id, smena_id, done (1 — сделано), price, time. Таблица на',
         '  сотни тысяч строк: только агрегаты и всегда с условием, целиком её',
         '  не выгружать.',
