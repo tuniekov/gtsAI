@@ -22,9 +22,32 @@ import { loadEnv} from 'vite'
 const mode ='development' //development
 process.env = {...process.env,...loadEnv(mode, './'),...loadEnv(mode, '../')}
 // console.log(config)
+/**
+ * Сборка для магазина: `npm run build:store`.
+ *
+ * ⚠️ Конфиги, разложенные по сайтам (страницы и засев данных), держат наши
+ * площадки: ключи 'modx28' и 'vk24' с чужими id родителей и нашими чатами.
+ * Покупателю это мусор: страница на его сайте не создастся (родителя 248 у
+ * него нет), а настройки чата расскажут про наши таблицы. В магазинной
+ * сборке оставляем только блок '*' - общий для любой установки, - а
+ * страницы не создаём вовсе: куда поставить чат, решает владелец сайта
+ * (вызов сниппета есть в readme пакета).
+ */
+const forStore = process.argv.includes('--store')
+const onlyCommon = (obj) => {
+    if (!forStore || !obj || typeof obj !== 'object') return obj
+    const keys = Object.keys(obj)
+    // Разложено по сайтам, если верхние ключи - метки площадок.
+    if (!keys.length || !keys.some(k => k === '*' || k === 'modx28' || k === 'vk24')) return obj
+    return obj['*'] ? { '*': obj['*'] } : {}
+}
+if (forStore) console.log('сборка для магазина: только общий блок, страницы не создаются')
+
 const form = new FormData()
 //console.log('process.env',process.env)        
-form.append('config', JSON.stringify(config))
+// Магазинную сборку на этот сайт не ставим: в ней нет наших блоков, и
+// установка затёрла бы ими же собранные настройки дева.
+form.append('config', JSON.stringify(forStore ? { ...config, install: false } : config))
 
 if(config.schema){
     try{
@@ -50,9 +73,9 @@ form.append('templates', JSON.stringify(templates))
 form.append('settings', JSON.stringify(settings))
 form.append('menus', JSON.stringify(menus))
 form.append('gtsapipackages', JSON.stringify(gtsapipackages, null, 2))
-form.append('data', JSON.stringify(data, null, 2))
+form.append('data', JSON.stringify(onlyCommon(data), null, 2))
 form.append('dependencies', JSON.stringify(dependencies, null, 2))
-form.append('resources', JSON.stringify(resources, null, 2))
+form.append('resources', JSON.stringify(forStore ? {} : resources, null, 2))
 form.append('resource_groups', JSON.stringify(resource_groups, null, 2))
 form.append('user_groups', JSON.stringify(user_groups, null, 2))
 form.append('permissions', JSON.stringify(permissions, null, 2))

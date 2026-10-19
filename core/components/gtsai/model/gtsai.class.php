@@ -2851,16 +2851,23 @@ class gtsAI
         ], [
             'name'         => 'sheet_find',
             'description'  =>
-                'Найти значение на листе и получить адреса и строки с ним. Так ищут позицию в номенклатуре, не вычитывая две тысячи строк.',
+                'Найти значения на листе: адрес ячейки, номер строки и саму строку. Так ищут позицию в номенклатуре, не вычитывая две тысячи строк.' . "\n" .
+                'Ищи СРАЗУ ПАЧКОЙ: queries - список до 100 значений за один вызов. Это один проход по листу, а сто отдельных вызовов - сто заходов и столько же оплаченных контекстов.' . "\n" .
+                'Чего не нашлось, вернётся списком not_found.',
             'input_schema' => [
                 'type'       => 'object',
                 'properties' => [
-                    'file'  => ['type' => 'string', 'description' => 'Имя книги. Если книга одна - можно не указывать'],
-                    'sheet' => ['type' => 'string', 'description' => 'Имя листа. Пусто - искать по всем листам'],
-                    'query' => ['type' => 'string', 'description' => 'Что искать, без учёта регистра'],
-                    'limit' => ['type' => 'integer', 'description' => 'Сколько совпадений вернуть, по умолчанию 20, максимум 100'],
+                    'file'    => ['type' => 'string', 'description' => 'Имя книги. Если книга одна - можно не указывать'],
+                    'sheet'   => ['type' => 'string', 'description' => 'Имя листа. Пусто - искать по всем листам'],
+                    'queries' => [
+                        'type'        => 'array',
+                        'items'       => ['type' => 'string'],
+                        'description' => 'Что искать - до 100 значений за раз, без учёта регистра',
+                    ],
+                    'query'   => ['type' => 'string', 'description' => 'Одно значение, если оно правда одно'],
+                    'columns' => ['type' => 'string', 'description' => 'Искать только в этих колонках, например B:C'],
+                    'limit'   => ['type' => 'integer', 'description' => 'Сколько совпадений на каждый запрос, по умолчанию 5 (для одиночного - 20)'],
                 ],
-                'required'   => ['query'],
             ],
         ]];
     }
@@ -2963,21 +2970,42 @@ class gtsAI
             return ['error' => 'Не понял, какая книга. Есть: '
                 . implode(', ', array_column($this->sheetSources(), 'name')) . '.'];
         }
-        $query = isset($input['query']) ? trim((string)$input['query']) : '';
-        if ($query === '') return ['error' => 'Нечего искать.'];
 
-        $limit = isset($input['limit']) ? (int)$input['limit'] : 20;
-        $limit = max(1, min(100, $limit));
+        // ⚠️ Принимаем СПИСОК запросов, а не один.
+        //
+        // Каждый вызов инструмента - это ещё один заход к модели, и весь
+        // контекст уезжает провайдеру заново. Разбирая заявку на полторы
+        // сотни позиций, модель искала бы их по одной: полторы сотни заходов
+        // при потолке в десяток шагов. Сто запросов в одном вызове - один
+        // проход по тому же кэшу листа, цена почти та же.
+        $queries = [];
+        if (isset($input['queries']) && is_array($input['queries'])) $queries = $input['queries'];
+        elseif (isset($input['query'])) $queries = [$input['query']];
+
+        $queries = array_values(array_filter(array_map(function ($q) {
+            return trim((string)$q);
+        }, $queries), function ($q) { return $q !== ''; }));
+
+        if (!$queries) return ['error' => 'Нечего искать: передай query или queries.'];
+        if (count($queries) > 100) $queries = array_slice($queries, 0, 100);
+
+        // На один запрос - сколько совпадений вернуть. Когда ищут пачкой,
+        // нужны не все вхождения, а «нашлось ли и где».
+        $perQuery = isset($input['limit']) ? (int)$input['limit'] : (count($queries) > 1 ? 5 : 20);
+        $perQuery = max(1, min(100, $perQuery));
 
         $meta = $this->sheetBookMeta($path);
         if (isset($meta['error'])) return $meta;
 
         $only = isset($input['sheet']) ? trim((string)$input['sheet']) : '';
-        $hits = [];
+        list($colFrom, $colTo) = $this->columnRange(isset($input['columns']) ? $input['columns'] : '');
+
+        $hits = array_fill(0, count($queries), []);
         $scanned = [];
+        $left = count($queries);
 
         foreach ($meta as $m) {
-            if ($m['rows'] <= 0) continue;
+            if ($m['rows'] <= 0 || $left === 0) continue;
             if ($only !== '' && !$this->sameName($m['name'], $only)) continue;
 
             $tsv = $this->sheetTsv($path, $m['name']);
@@ -2986,39 +3014,69 @@ class gtsAI
 
             $fh = @fopen($tsv, 'r');
             if (!$fh) continue;
-            while (($line = fgets($fh)) !== false) {
-                if (count($hits) >= $limit) break;
-                if (mb_stripos($line, $query, 0, 'UTF-8') === false) continue;
 
-                $cells = explode("\t", rtrim($line, "\r\n"));
-                $rowNo = (int)array_shift($cells);
-                $where = '';
-                foreach ($cells as $i => $v) {
-                    if (mb_stripos($v, $query, 0, 'UTF-8') !== false) {
-                        $where = $this->colLetter($i) . $rowNo;
-                        break;
+            while (($line = fgets($fh)) !== false) {
+                if ($left === 0) break;
+                $line = rtrim($line, "\r\n");
+
+                $cells = null;
+                foreach ($queries as $qi => $q) {
+                    if (count($hits[$qi]) >= $perQuery) continue;
+                    // Сначала дешёвая проверка по всей строке, и только для
+                    // попавших разбираем её на ячейки.
+                    if (mb_stripos($line, $q, 0, 'UTF-8') === false) continue;
+
+                    if ($cells === null) {
+                        $cells = explode("\t", $line);
+                        $rowNo = (int)array_shift($cells);
+                        if ($colTo >= 0)      $view = array_slice($cells, $colFrom, $colTo - $colFrom + 1);
+                        elseif ($colFrom > 0) $view = array_slice($cells, $colFrom);
+                        else                  $view = $cells;
                     }
+
+                    $where = '';
+                    foreach ($view as $i => $v) {
+                        if (mb_stripos($v, $q, 0, 'UTF-8') !== false) {
+                            $where = $this->colLetter($colFrom + $i) . $rowNo;
+                            break;
+                        }
+                    }
+                    // Нашлось вне запрошенных колонок - для этого запроса
+                    // совпадением не считаем.
+                    if ($where === '') continue;
+
+                    $text = $view;
+                    while ($text && end($text) === '') array_pop($text);
+
+                    $hits[$qi][] = [
+                        'sheet' => $m['name'],
+                        'cell'  => $where,
+                        'row'   => $rowNo,
+                        'text'  => mb_substr(implode(' | ', $text), 0, 300, 'UTF-8'),
+                    ];
+                    if (count($hits[$qi]) >= $perQuery) $left--;
                 }
-                while ($cells && end($cells) === '') array_pop($cells);
-                $hits[] = [
-                    'sheet' => $m['name'],
-                    'cell'  => $where,
-                    'row'   => $rowNo,
-                    'text'  => mb_substr(implode(' | ', $cells), 0, 300, 'UTF-8'),
-                ];
             }
             fclose($fh);
-            if (count($hits) >= $limit) break;
         }
 
-        return [
+        $results = [];
+        $missed  = [];
+        foreach ($queries as $qi => $q) {
+            if (!$hits[$qi]) { $missed[] = $q; continue; }
+            $results[] = ['query' => $q, 'found' => count($hits[$qi]), 'matches' => $hits[$qi]];
+        }
+
+        $out = [
             'file'    => basename($path),
-            'query'   => $query,
             'sheets'  => $scanned,
-            'found'   => count($hits),
-            'matches' => $hits,
-            'hint'    => $hits ? 'Строку целиком бери sheet_read с from_row нужной строки.' : 'Ничего не нашлось.',
+            'results' => $results,
         ];
+        if ($missed) $out['not_found'] = $missed;
+        $out['hint'] = $results
+            ? 'Строку целиком бери sheet_read с from_row нужной строки.'
+            : 'Ничего не нашлось - проверь лист и написание.';
+        return $out;
     }
 
     /** Диапазон колонок вида «A:N» в индексы. [от, до], до = -1 значит все. */

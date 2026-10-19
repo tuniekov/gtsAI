@@ -10,6 +10,9 @@ export default {
     // компонента на сайте, и без этого списка в него попадали вложения чатов
     // с дева - то есть уезжали на чужие площадки вместе с кодом.
     exclude:["files", "cache"],
+    // Попадёт в requires манифеста: MODX проверит это до распаковки.
+    // Сам пакет gtsAPI дописывается туда из dependencies.js.
+    requires:{ modx: ">=2.8", php: ">=7.4" },
     update:{
         snippets: true,
         plugins: true,
