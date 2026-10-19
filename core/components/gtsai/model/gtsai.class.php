@@ -1548,16 +1548,25 @@ class gtsAI
         }
 
         $killed = 0;
-        $edge = time() - 86400;
+        $young  = 0;
+        // Час - с запасом: строка в базе появляется в том же запросе, что и
+        // файл. Всё, что старше и без записи, - мусор.
+        $edge = time() - 3600;
         foreach ((array)@scandir($dir) as $name) {
             if ($name === '.' || $name === '..' || $name[0] === '.') continue;
             $full = $dir . $name;
             if (!is_file($full) || isset($known[$name])) continue;
-            if (@filemtime($full) > $edge) continue;
+            if (@filemtime($full) > $edge) { $young++; continue; }
             if (@unlink($full)) $killed++;
         }
 
-        @file_put_contents($mark, date('Y-m-d H:i:s') . ", удалено без записи: " . $killed . "\n");
+        // ⚠️ Отметку ставим, только если смотреть больше не на что. Иначе
+        // разовая уборка «отработает» на свежераспакованных файлах, которые
+        // мы пощадили по возрасту, и больше не вернётся.
+        if ($young === 0) {
+            @file_put_contents($mark, date('Y-m-d H:i:s') . ', удалено без записи: ' . $killed . "\n");
+        }
+
         if ($killed) {
             $this->modx->log(modX::LOG_LEVEL_INFO,
                 '[gtsAI] из хранилища убраны файлы без записи в базе: ' . $killed);
