@@ -1553,49 +1553,111 @@ class gtsAI
         if (!$path) return 'Не удалось прочитать таблицу: на сайте нет библиотеки PHPExcel.';
         require_once $path . 'PHPExcel.php';
 
+        // Книга целиком разворачивается в память: расчётная форма на 5 МБ
+        // съедает около 160 МБ и четыре секунды. Один раз это терпимо (дальше
+        // работает кэш), но на совсем больших файлах лучше честно отказаться,
+        // чем упасть по памяти посреди запроса.
+        $size = (int)@filesize($file);
+        if ($size > 12 * 1024 * 1024) {
+            return 'Таблица «' . $name . '» слишком большая (' . round($size / 1048576) . ' МБ). '
+                . 'Положите выжимку: нужные листы без лишних данных.';
+        }
+        $memoryWas = @ini_get('memory_limit');
+        @ini_set('memory_limit', '768M');
+
+        // ⚠️ Весь разбор под одним catch, включая обход листов.
+        //
+        // Расчётная форма, положенная правилом, роняла ВЕСЬ запрос: toArray()
+        // с пересчётом формул кидал PHPExcel_Calculation_Exception («Formula
+        // Error» на цепочке Расчет заявки!BU1 -> ... -> воздуховоды!J7), а
+        // ловили мы раньше только load(). Фатал прилетал посреди сборки
+        // системного промпта - снаружи это выглядело как «чат заткнулся»:
+        // ни ответа, ни ошибки.
         try {
             $reader = PHPExcel_IOFactory::createReaderForFile($file);
             $reader->setReadDataOnly(true);
             $book = $reader->load($file);
+
+            $out = [];
+            foreach ($book->getWorksheetIterator() as $sheet) {
+                $rows = $this->sheetRows($sheet, $maxRows);
+                if (!$rows['clean']) continue;
+
+                $out[] = 'Лист «' . $sheet->getTitle() . '», значимых строк: ' . $rows['total']
+                    . ($rows['total'] > $maxRows ? ' (показаны первые ' . $maxRows . ')' : '');
+                foreach ($rows['clean'] as $row) {
+                    $out[] = implode("\t", array_map(function ($v) {
+                        return str_replace(["\t", "\n", "\r"], ' ', (string)$v);
+                    }, $row));
+                }
+                $out[] = '';
+            }
         } catch (\Throwable $e) {
+            if ($memoryWas !== false) @ini_set('memory_limit', $memoryWas);
             return 'Не удалось прочитать таблицу «' . $name . '»: ' . $e->getMessage();
         }
-
-        $out = [];
-
-        foreach ($book->getWorksheetIterator() as $sheet) {
-            // ⚠️ Сначала выбрасываем пустое, и только потом считаем и режем.
-            // Excel отдаёт лист «целиком»: в заявке на 17 строк их бывает
-            // несколько сотен, и модель получала гору пустоты вместо данных —
-            // а в лимит 300 строк настоящие данные могли и не попасть.
-            $clean = [];
-            foreach ($sheet->toArray(null, true, false, false) as $row) {
-                while ($row && ($row[count($row) - 1] === null || trim((string)$row[count($row) - 1]) === '')) {
-                    array_pop($row);
-                }
-                if (!$row) continue;
-                $clean[] = $row;
-            }
-
-            $total = count($clean);
-            if (!$total) continue;
-
-            $out[] = 'Лист «' . $sheet->getTitle() . '», значимых строк: ' . $total
-                . ($total > $maxRows ? ' (показаны первые ' . $maxRows . ')' : '');
-
-            foreach (array_slice($clean, 0, $maxRows) as $row) {
-                $out[] = implode("\t", array_map(function ($v) {
-                    return str_replace(["\t", "\n", "\r"], ' ', (string)$v);
-                }, $row));
-            }
-            $out[] = '';
-        }
+        if ($memoryWas !== false) @ini_set('memory_limit', $memoryWas);
 
         $text = implode("\n", $out);
         if (strlen($text) > $maxChars) {
             $text = substr($text, 0, $maxChars) . "\n…обрезано: таблица слишком большая.";
         }
         return $text !== '' ? $text : 'Таблица «' . $name . '» пустая.';
+    }
+
+    /**
+     * Значимые строки листа.
+     *
+     * ⚠️ Формулы НЕ пересчитываем: берём значение, которое Excel сохранил сам
+     * (getOldCalculatedValue). Пересчёт чужой книги - это не «аккуратнее», а
+     * лотерея: движок PHPExcel знает не все функции, ссылки между листами
+     * рвутся, и на расчётной форме он падал с Formula Error. Нам нужно
+     * содержимое, а не бухгалтерия.
+     *
+     * Читаем не больше, чем покажем: обходим строки по порядку и
+     * останавливаемся, набрав $maxRows значимых. На листе в три тысячи строк
+     * это разница между секундой и минутой.
+     */
+    protected function sheetRows($sheet, $maxRows)
+    {
+        $clean = [];
+        $total = 0;
+
+        foreach ($sheet->getRowIterator() as $row) {
+            $cells = [];
+
+            // ⚠️ У пустой строки обход по существующим ячейкам кидает
+            // исключение («No cells exist within the specified range»), а
+            // пустых строк в чужой книге сколько угодно. Пропускаем их, а не
+            // отказываемся от всего листа - на расчётной форме именно это
+            // съедало весь разбор.
+            try {
+                $it = $row->getCellIterator();
+                $it->setIterateOnlyExistingCells(true);
+            } catch (\Throwable $e) {
+                continue;
+            }
+
+            foreach ($it as $cell) {
+                $v = $cell->getDataType() === PHPExcel_Cell_DataType::TYPE_FORMULA
+                    ? $cell->getOldCalculatedValue()
+                    : $cell->getValue();
+                if ($v === null || $v === '') continue;
+                $cells[PHPExcel_Cell::columnIndexFromString($cell->getColumn()) - 1] = $v;
+            }
+            if (!$cells) continue;
+
+            $total++;
+            if (count($clean) >= $maxRows) continue;
+
+            // Дырки в середине строки сохраняем: по ним видно, в какой колонке
+            // что лежит, а это и есть вопрос «куда вставлять».
+            $line = array_fill(0, max(array_keys($cells)) + 1, '');
+            foreach ($cells as $i => $v) $line[$i] = $v;
+            $clean[] = $line;
+        }
+
+        return ['clean' => $clean, 'total' => $total];
     }
 
     /**
@@ -1925,10 +1987,12 @@ class gtsAI
             $prompt .= "\n\nДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА (подгружай инструментом read_prompt по имени,"
                 . " когда правило относится к задаче; содержание по названию не угадывай):";
             foreach ($extras as $extra) {
-                // Число частей показываем сразу: регламент на сотню страниц
-                // приходит кусками, и модель должна понимать это до вызова,
-                // а не удивляться обрыву на первой части.
-                $parts = count($this->splitForTool((string)$extra['text']));
+                // Число частей показываем, когда текст уже под рукой: правило
+                // из поля или разобранный файл в кэше. Ради одной подсказки
+                // разбирать книгу Excel на каждое сообщение незачем - модель
+                // узнает число частей из первого же read_prompt.
+                $known = $this->promptTextIfReady($extra);
+                $parts = $known === null ? 0 : count($this->splitForTool($known));
                 $prompt .= "\n- " . $extra['name']
                     . ($extra['description'] !== '' ? ': ' . $extra['description'] : '')
                     . ($parts > 1 ? ' [частей: ' . $parts . ']' : '');
@@ -2031,6 +2095,7 @@ class gtsAI
                 'name'        => (string)$row->get('name'),
                 'description' => trim((string)$row->get('description')),
                 'text'        => (string)$row->get('text'),
+                'file'        => '',
             ];
         }
 
@@ -2044,20 +2109,18 @@ class gtsAI
         foreach ($this->modx->getCollection('gtsAISettingFile', $f) as $row) {
             $full = $this->settingFilePath((string)$row->get('path'));
             if ($full === '' || !is_file($full)) continue;
-            // xlsx/csv разбираем в текст, а не отдаём двоичным: именно так
-            // к чату прикладывают шаблон заявки, и модели нужны заголовки
-            // листа, а не «файл читается как двоичные данные».
-            $fname = (string)$row->get('name');
+            // ⚠️ Сам файл здесь НЕ читаем - только запоминаем путь.
+            //
+            // Этот список собирается на каждое сообщение (из него строится
+            // каталог правил в системном промпте), а чтение файла - не
+            // «прочесть строку»: расчётная форма на три тысячи строк
+            // разбирается секундами и гигабайтами. Текст берётся по
+            // требованию, в read_prompt, и кладётся в кэш.
             $rows[] = [
-                'name'        => $fname,
+                'name'        => (string)$row->get('name'),
                 'description' => trim((string)$row->get('description')),
-                // ⚠️ Правило читаем целиком, без потолка в 60 000 знаков.
-                // Регламент на 144 КБ обрезался посреди раздела, и модель
-                // честно писала «регламент обрезан»: потолок тут лишний -
-                // длинное правило и так уезжает к модели частями (read_prompt).
-                'text'        => $this->isSheet($full)
-                    ? $this->sheetToText($full, $fname, 5000, 2000000)
-                    : $this->textToText($full, $fname, 2000000),
+                'text'        => '',
+                'file'        => $full,
             ];
         }
 
@@ -2121,7 +2184,7 @@ class gtsAI
         // Длинный регламент отдаём частями: целиком он не влезает в потолок
         // ответа инструмента, и раньше модель получала «Ответ слишком большой»
         // без единого способа дочитать.
-        $parts = $this->splitForTool((string)$found['text']);
+        $parts = $this->splitForTool($this->promptText($found));
         $total = count($parts);
         $n = isset($input['part']) ? (int)$input['part'] : 1;
         if ($n < 1) $n = 1;
@@ -2136,6 +2199,61 @@ class gtsAI
                 : 'Это последняя часть (' . $n . ' из ' . $total . ').';
         }
         return $out;
+    }
+
+    /**
+     * Текст правила. Для правил-файлов читается здесь, а не при сборке списка.
+     *
+     * Разобранный текст кладём в кэш рядом с остальным кэшем MODX и
+     * привязываем к времени правки файла: директор поправил файл - кэш
+     * сам перестал подходить, ничего чистить руками не надо.
+     */
+    protected function promptText(array $extra)
+    {
+        $file = isset($extra['file']) ? (string)$extra['file'] : '';
+        if ($file === '' || !is_file($file)) return (string)$extra['text'];
+
+        $cache = $this->ruleCachePath($file);
+        if ($cache !== '' && is_file($cache)) {
+            $hit = file_get_contents($cache);
+            if ($hit !== false) return $hit;
+        }
+
+        $name = (string)$extra['name'];
+        // Правило читаем целиком: потолок в 60 000 знаков резал регламент
+        // посреди раздела, а длинное правило и так уезжает частями.
+        $text = $this->isSheet($file)
+            ? $this->sheetToText($file, $name, 300, 300000)
+            : $this->textToText($file, $name, 2000000);
+
+        if ($cache !== '') {
+            $dir = dirname($cache);
+            if (!is_dir($dir)) @mkdir($dir, 0775, true);
+            @file_put_contents($cache, $text);
+        }
+        return $text;
+    }
+
+    /** Текст правила, если он уже есть даром (поле или кэш). Иначе null. */
+    protected function promptTextIfReady(array $extra)
+    {
+        $file = isset($extra['file']) ? (string)$extra['file'] : '';
+        if ($file === '') return (string)$extra['text'];
+
+        $cache = $this->ruleCachePath($file);
+        if ($cache !== '' && is_file($cache)) {
+            $hit = file_get_contents($cache);
+            if ($hit !== false) return $hit;
+        }
+        return null;
+    }
+
+    /** Где лежит разобранный текст правила-файла. Пусто - кэш недоступен. */
+    protected function ruleCachePath($file)
+    {
+        $mtime = @filemtime($file);
+        if (!$mtime) return '';
+        return MODX_CORE_PATH . 'cache/gtsai_rules/' . md5($file) . '-' . $mtime . '.txt';
     }
 
     /** Имя правила для сравнения: без краёв, без лишних пробелов, в нижнем регистре. */
