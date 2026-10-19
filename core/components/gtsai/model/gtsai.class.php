@@ -53,6 +53,9 @@ class gtsAI
     /** @var array|null книги Excel, доступные чату (правила и файлы разговора) */
     protected $sheets = null;
 
+    /** @var array файлы, выданные моделью в этом ходе (для истории чата) */
+    protected $turnFiles = [];
+
     /**
      * Сколько байт шагов хода храним и пересылаем обратно. Больше - дороже
      * каждое следующее сообщение в этом чате: история уходит провайдеру целиком.
@@ -597,7 +600,11 @@ class gtsAI
         $row->save();
 
         $url = $this->modx->getOption('site_url') . 'gtsai/file/' . (int)$row->id;
-        $this->sse('file', ['id' => (int)$row->id, 'name' => $name, 'url' => $url, 'size' => (int)$row->get('size')]);
+        $out = ['id' => (int)$row->id, 'name' => $name, 'url' => $url, 'size' => (int)$row->get('size')];
+        // Ссылка должна пережить перезагрузку чата, поэтому кроме показа
+        // «вживую» кладём её в историю рядом с ответом.
+        $this->turnFiles[] = $out;
+        $this->sse('file', $out);
 
         return [
             'saved' => $name,
@@ -2940,7 +2947,7 @@ class gtsAI
         if (!$chat) return;
         // Пустой ответ (провайдер сорвался, текста не было) в историю не пишем:
         // показывать в чате нечего, а модели он только мешает.
-        if ($role === 'assistant' && trim((string)$content) === '' && !$turn) return;
+        if ($role === 'assistant' && trim((string)$content) === '' && !$turn && !$this->turnFiles) return;
         $now = date('Y-m-d H:i:s');
 
         // В blocks у пользователя - только ССЫЛКИ на файлы: само содержимое
@@ -2949,16 +2956,37 @@ class gtsAI
         // получила. Без них продолжение разговора («продолжай») начиналось
         // с чистого листа: в истории оставался только текст ответа, и модель
         // заново искала то, что уже нашла.
-        $blocks = null;
-        if ($fileIds) {
-            $blocks = json_encode(['file_ids' => $fileIds], JSON_UNESCAPED_UNICODE);
-        } elseif ($turn) {
+        $pack = [];
+        if ($fileIds) $pack['file_ids'] = $fileIds;
+
+        if ($turn) {
+            // ⚠️ Список вызовов храним ОТДЕЛЬНО от самого хода.
+            //
+            // Ход - это ещё и ответы инструментов: часть регламента, кусок
+            // листа, сотня строк таблицы. Такой ход в потолок не влезает и
+            // раньше не сохранялся целиком - а вместе с ним пропадали и
+            // строки «чем модель пользовалась». Открытый заново чат выглядел
+            // так, будто модель всё придумала из головы. Вызовы весят
+            // копейки, их держим всегда.
+            $calls = [];
+            foreach ($turn as $step) {
+                if (!isset($step['role']) || $step['role'] !== 'assistant') continue;
+                foreach ((array)$step['content'] as $block) {
+                    if (!is_array($block) || !isset($block['type']) || $block['type'] !== 'tool_use') continue;
+                    $calls[] = ['name' => $block['name'], 'input' => $block['input']];
+                }
+            }
+            if ($calls) $pack['calls'] = $calls;
+
             $packed = json_encode(['turn' => $turn], JSON_UNESCAPED_UNICODE);
-            // Ход с десятком выгрузок тянет на сотни килобайт. Храним только
-            // то, что не жалко переслать обратно; остальное - как раньше,
-            // текстом ответа.
-            if ($packed !== false && strlen($packed) <= self::TURN_KEEP_BYTES) $blocks = $packed;
+            // Сам ход пересылается провайдеру на каждом следующем сообщении,
+            // поэтому тяжёлый не храним.
+            if ($packed !== false && strlen($packed) <= self::TURN_KEEP_BYTES) $pack['turn'] = $turn;
         }
+
+        if ($role === 'assistant' && $this->turnFiles) $pack['files'] = $this->turnFiles;
+
+        $blocks = $pack ? json_encode($pack, JSON_UNESCAPED_UNICODE) : null;
 
         $this->modx->newObject('gtsAIMessage', [
             'chat_id'    => $chat->id,
