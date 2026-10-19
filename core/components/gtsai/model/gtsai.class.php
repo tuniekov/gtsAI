@@ -50,6 +50,9 @@ class gtsAI
     /** @var array|null доппромпты настройки, прочитанные один раз */
     protected $extras = null;
 
+    /** @var array|null книги Excel, доступные чату (правила и файлы разговора) */
+    protected $sheets = null;
+
     /**
      * Сколько байт шагов хода храним и пересылаем обратно. Больше - дороже
      * каждое следующее сообщение в этом чате: история уходит провайдеру целиком.
@@ -362,7 +365,7 @@ class gtsAI
                     'required'   => ['table'],
                 ],
             ],
-        ], $this->actionToolDefs(), $this->promptToolDefs(), $this->fileToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
+        ], $this->actionToolDefs(), $this->promptToolDefs(), $this->sheetToolDefs(), $this->fileToolDefs(), $this->sqlToolDefs(), $this->writeToolDefs());
     }
 
     /**
@@ -892,6 +895,15 @@ class gtsAI
 
             case 'read_prompt':
                 return $this->readPrompt($input);
+
+            case 'sheet_list':
+                return $this->toolSheetList($input);
+
+            case 'sheet_read':
+                return $this->toolSheetRead($input);
+
+            case 'sheet_find':
+                return $this->toolSheetFind($input);
 
             case 'sql_query':
                 return $this->runSql($input);
@@ -2220,10 +2232,12 @@ class gtsAI
         }
 
         $name = (string)$extra['name'];
-        // Правило читаем целиком: потолок в 60 000 знаков резал регламент
-        // посреди раздела, а длинное правило и так уезжает частями.
+        // ⚠️ Книгу Excel правилом НЕ выгружаем. Расчётная форма давала 300 КБ
+        // текста (одиннадцать частей!) при том, что нужны из неё две строки
+        // заголовков да пара позиций номенклатуры. Вместо простыни - краткая
+        // опись листов и указание на инструменты: читать по листу и искать.
         $text = $this->isSheet($file)
-            ? $this->sheetToText($file, $name, 300, 300000)
+            ? $this->sheetDigest($file, $name)
             : $this->textToText($file, $name, 2000000);
 
         if ($cache !== '') {
@@ -2246,6 +2260,27 @@ class gtsAI
             if ($hit !== false) return $hit;
         }
         return null;
+    }
+
+    /**
+     * Короткая опись книги: что за листы и сколько в них строк. Данные
+     * читаются не отсюда, а инструментами sheet_read / sheet_find.
+     */
+    protected function sheetDigest($file, $name)
+    {
+        $meta = $this->sheetBookMeta($file);
+        if (isset($meta['error'])) return 'Таблица «' . $name . '»: ' . $meta['error'];
+
+        $out = ['Таблица «' . $name . '» (файл ' . basename($file) . '). Листы:'];
+        foreach ($meta as $m) {
+            if ($m['rows'] <= 0) continue;
+            $out[] = '- ' . $m['name'] . ': строк ' . $m['rows']
+                . ($m['letter'] !== '' ? ', колонки A:' . $m['letter'] : '');
+        }
+        $out[] = '';
+        $out[] = 'Целиком она в ответ не влезет. Нужный кусок бери sheet_read '
+            . '(в ответе есть буквы колонок и номера строк), поиск по листу - sheet_find.';
+        return implode("\n", $out);
     }
 
     /** Где лежит разобранный текст правила-файла. Пусто - кэш недоступен. */
@@ -2300,6 +2335,478 @@ class gtsAI
         }
         if ($buf !== '') $parts[] = $buf;
         return $parts;
+    }
+
+
+    /* ------------------------------------------------------------------ *
+     *  Таблицы как источник, а не как простыня текста
+     *
+     *  ⚠️ Книгу целиком в контекст не отдаём. Расчётная форма - это 5 МБ,
+     *  22 листа и три тысячи строк на иных; её разбор съедал 160 МБ и
+     *  четыре секунды, а в ответ уезжали сотни килобайт, из которых нужны
+     *  были две строки заголовков. Поэтому: список листов берётся из
+     *  метаданных (данные не читаются вовсе), лист разбирается ТОЛЬКО когда
+     *  его попросили, и ложится в кэш отдельным файлом. Второй и всякий
+     *  следующий запрос к тому же листу - это чтение готового tsv.
+     * ------------------------------------------------------------------ */
+
+    /** Сколько строк листа держим в кэше. Дальше - только через поиск. */
+    const SHEET_CACHE_ROWS = 20000;
+
+    /**
+     * Таблицы, доступные чату: правила-файлы и файлы, загруженные в этот чат.
+     * Ключ - имя, по которому модель их зовёт.
+     */
+    protected function sheetSources()
+    {
+        if ($this->sheets !== null) return $this->sheets;
+
+        $out = [];
+        foreach ($this->extraPrompts() as $extra) {
+            $file = isset($extra['file']) ? (string)$extra['file'] : '';
+            if ($file !== '' && is_file($file) && $this->isSheet($file)) {
+                $out[] = ['name' => (string)$extra['name'], 'path' => $file];
+            }
+        }
+
+        // Файлы этого разговора: заявка, прайс - всё, что прислал пользователь.
+        if ($this->chat) {
+            $c = $this->modx->newQuery('gtsAIFile');
+            $c->where(['chat_id' => (int)$this->chat->id, 'user_id' => $this->modx->user->id]);
+            $c->sortby('id', 'DESC');
+            $c->limit(20);
+            foreach ($this->modx->getCollection('gtsAIFile', $c) as $row) {
+                $name = (string)$row->get('name');
+                if (!$this->isSheet($name, (string)$row->get('mime'))) continue;
+                $full = $this->filesPath() . $row->get('path');
+                if (!is_file($full)) continue;
+                $out[] = ['name' => $name, 'path' => $full];
+            }
+        }
+
+        return $this->sheets = $out;
+    }
+
+    /** Какой файл имелся в виду. Пусто - не нашли. */
+    protected function resolveSheetFile($name)
+    {
+        $list = $this->sheetSources();
+        if (!$list) return '';
+
+        $name = trim((string)$name);
+        if ($name === '') return count($list) === 1 ? $list[0]['path'] : '';
+
+        foreach ($list as $s) {
+            if ($this->sameName($s['name'], $name)) return $s['path'];
+        }
+        // Имя файла модель часто пишет без расширения или кусочком.
+        $hits = [];
+        foreach ($list as $s) {
+            $a = $this->normName($s['name']);
+            $b = $this->normName($name);
+            if ($b !== '' && (strpos($a, $b) !== false || strpos($b, $a) !== false)) $hits[] = $s['path'];
+        }
+        return count($hits) === 1 ? $hits[0] : '';
+    }
+
+    /** Папка кэша книги. Привязана ко времени правки: правили - кэш другой. */
+    protected function sheetCacheDir($path)
+    {
+        $mtime = @filemtime($path);
+        if (!$mtime) return '';
+        $dir = MODX_CORE_PATH . 'cache/gtsai_sheets/' . md5($path) . '-' . $mtime . '/';
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+        return is_dir($dir) ? $dir : '';
+    }
+
+    /**
+     * Листы книги: имя, строк, колонок. Данные при этом НЕ читаются -
+     * PHPExcel умеет отдавать метаданные листов отдельно, и это дёшево.
+     */
+    protected function sheetBookMeta($path)
+    {
+        $dir = $this->sheetCacheDir($path);
+        $meta = $dir !== '' ? $dir . 'meta.json' : '';
+        if ($meta !== '' && is_file($meta)) {
+            $hit = json_decode((string)file_get_contents($meta), true);
+            if (is_array($hit)) return $hit;
+        }
+
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        if ($ext === 'csv') {
+            $rows = 0;
+            $fh = @fopen($path, 'r');
+            if ($fh) { while (fgets($fh) !== false) $rows++; fclose($fh); }
+            $info = [['name' => 'csv', 'rows' => $rows, 'cols' => 0, 'letter' => '']];
+        } else {
+            $lib = gtsAPI::phpExcelPath($this->modx);
+            if (!$lib) return ['error' => 'На сайте нет библиотеки PHPExcel.'];
+            require_once $lib . 'PHPExcel.php';
+            try {
+                $reader = PHPExcel_IOFactory::createReaderForFile($path);
+                $info = [];
+                foreach ($reader->listWorksheetInfo($path) as $w) {
+                    $info[] = [
+                        'name'   => (string)$w['worksheetName'],
+                        'rows'   => (int)$w['totalRows'],
+                        'cols'   => (int)$w['totalColumns'],
+                        'letter' => (string)$w['lastColumnLetter'],
+                    ];
+                }
+            } catch (\Throwable $e) {
+                return ['error' => 'Не удалось прочитать книгу: ' . $e->getMessage()];
+            }
+        }
+
+        if ($meta !== '') @file_put_contents($meta, json_encode($info, JSON_UNESCAPED_UNICODE));
+        return $info;
+    }
+
+    /**
+     * Разобранный лист в кэше: строка файла = номер строки и значения через
+     * табуляцию. Загружаем ТОЛЬКО нужный лист (setLoadSheetsOnly) - остальные
+     * двадцать книгу в память не тянут.
+     */
+    protected function sheetTsv($path, $sheetName)
+    {
+        $dir = $this->sheetCacheDir($path);
+        $file = $dir !== '' ? $dir . md5($sheetName) . '.tsv' : '';
+        if ($file !== '' && is_file($file)) return $file;
+
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        $lines = [];
+
+        if ($ext === 'csv') {
+            $fh = @fopen($path, 'r');
+            if (!$fh) return '';
+            $n = 0;
+            while (($row = fgetcsv($fh, 0, ';')) !== false && $n < self::SHEET_CACHE_ROWS) {
+                $n++;
+                $lines[] = $n . "\t" . implode("\t", array_map([$this, 'flatCell'], $row));
+            }
+            fclose($fh);
+        } else {
+            $lib = gtsAPI::phpExcelPath($this->modx);
+            if (!$lib) return '';
+            require_once $lib . 'PHPExcel.php';
+
+            $was = @ini_get('memory_limit');
+            @ini_set('memory_limit', '768M');
+            try {
+                $reader = PHPExcel_IOFactory::createReaderForFile($path);
+                $reader->setReadDataOnly(true);
+                $reader->setLoadSheetsOnly($sheetName);
+                $book = $reader->load($path);
+                $sheet = $book->getSheetByName($sheetName);
+                if (!$sheet) $sheet = $book->getActiveSheet();
+
+                $n = 0;
+                foreach ($sheet->getRowIterator() as $row) {
+                    if (++$n > self::SHEET_CACHE_ROWS) break;
+                    try {
+                        $it = $row->getCellIterator();
+                        $it->setIterateOnlyExistingCells(true);
+                    } catch (\Throwable $e) {
+                        continue;
+                    }
+                    $cells = [];
+                    foreach ($it as $cell) {
+                        // Формулы не считаем - берём то, что сохранил Excel.
+                        $v = $cell->getDataType() === PHPExcel_Cell_DataType::TYPE_FORMULA
+                            ? $cell->getOldCalculatedValue()
+                            : $cell->getValue();
+                        if ($v === null || $v === '') continue;
+                        $cells[$this->colIndex($cell->getColumn())] = $this->flatCell($v);
+                    }
+                    if (!$cells) continue;
+
+                    $line = array_fill(0, max(array_keys($cells)) + 1, '');
+                    foreach ($cells as $i => $v) $line[$i] = $v;
+                    $lines[] = $row->getRowIndex() . "\t" . implode("\t", $line);
+                }
+                $book->disconnectWorksheets();
+                unset($book);
+            } catch (\Throwable $e) {
+                if ($was !== false) @ini_set('memory_limit', $was);
+                return '';
+            }
+            if ($was !== false) @ini_set('memory_limit', $was);
+        }
+
+        if ($file === '') return '';
+        return @file_put_contents($file, implode("\n", $lines)) !== false ? $file : '';
+    }
+
+    /** Значение ячейки одной строкой: табуляции и переводы строк убиваем. */
+    public function flatCell($v)
+    {
+        return str_replace(["\t", "\n", "\r"], ' ', (string)$v);
+    }
+
+    /** Буквы колонок — шапка, по которой модель назовёт адрес ячейки. */
+    protected function columnLetters($from, $count)
+    {
+        $out = [];
+        for ($i = 0; $i < $count; $i++) $out[] = $this->colLetter($from + $i);
+        return $out;
+    }
+
+    /**
+     * Номер колонки в букву и обратно, своими руками.
+     *
+     * ⚠️ Не через PHPExcel: он подгружается только когда лист реально
+     * разбирают, а буквы нужны и при работе по кэшу - иначе «Class
+     * PHPExcel_Cell not found» ровно там, где мы гордились, что книгу не
+     * открывали. Счёт от нуля: колонка A это 0.
+     */
+    protected function colLetter($i)
+    {
+        $i = (int)$i;
+        if ($i < 0) return 'A';
+        $s = '';
+        while (true) {
+            $s = chr(65 + ($i % 26)) . $s;
+            $i = intdiv($i, 26) - 1;
+            if ($i < 0) break;
+        }
+        return $s;
+    }
+
+    /** Буква колонки в номер (A = 0). Мусор в строке игнорируем. */
+    protected function colIndex($letter)
+    {
+        $letter = strtoupper(preg_replace('~[^A-Za-z]~', '', (string)$letter));
+        if ($letter === '') return 0;
+        $n = 0;
+        for ($i = 0, $len = strlen($letter); $i < $len; $i++) {
+            $n = $n * 26 + (ord($letter[$i]) - 64);
+        }
+        return $n - 1;
+    }
+
+    /** Инструменты по таблицам. Показываем, только если таблицы есть. */
+    protected function sheetToolDefs()
+    {
+        if (!$this->sheetSources()) return [];
+
+        $names = implode(', ', array_map(function ($s) { return '«' . $s['name'] . '»'; }, $this->sheetSources()));
+
+        return [[
+            'name'         => 'sheet_list',
+            'description'  =>
+                'Листы книги Excel: имя, сколько строк, до какой колонки. Данные при этом не читаются.' . "\n" .
+                'Доступные книги: ' . $names . '.' . "\n" .
+                'С этого начинай работу с таблицей: целиком она в ответ не влезет.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'file' => ['type' => 'string', 'description' => 'Имя книги из списка. Если книга одна - можно не указывать'],
+                ],
+            ],
+        ], [
+            'name'         => 'sheet_read',
+            'description'  =>
+                'Прочитать кусок листа. В ответе первой строкой идут БУКВЫ КОЛОНОК, дальше строки с их номерами из Excel - так адрес ячейки виден сразу (например B15).' . "\n" .
+                'Бери то, что нужно: шапку (первые строки) или нужный диапазон. За раз - не больше 200 строк.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'file'      => ['type' => 'string', 'description' => 'Имя книги. Если книга одна - можно не указывать'],
+                    'sheet'     => ['type' => 'string', 'description' => 'Имя листа'],
+                    'from_row'  => ['type' => 'integer', 'description' => 'С какой строки Excel начать, по умолчанию 1'],
+                    'rows'      => ['type' => 'integer', 'description' => 'Сколько строк вернуть, по умолчанию 30, максимум 200'],
+                    'columns'   => ['type' => 'string', 'description' => 'Диапазон колонок, например A:N. Пусто - все'],
+                ],
+                'required'   => ['sheet'],
+            ],
+        ], [
+            'name'         => 'sheet_find',
+            'description'  =>
+                'Найти значение на листе и получить адреса и строки с ним. Так ищут позицию в номенклатуре, не вычитывая две тысячи строк.',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'file'  => ['type' => 'string', 'description' => 'Имя книги. Если книга одна - можно не указывать'],
+                    'sheet' => ['type' => 'string', 'description' => 'Имя листа. Пусто - искать по всем листам'],
+                    'query' => ['type' => 'string', 'description' => 'Что искать, без учёта регистра'],
+                    'limit' => ['type' => 'integer', 'description' => 'Сколько совпадений вернуть, по умолчанию 20, максимум 100'],
+                ],
+                'required'   => ['query'],
+            ],
+        ]];
+    }
+
+    /** sheet_list */
+    protected function toolSheetList(array $input)
+    {
+        $path = $this->resolveSheetFile(isset($input['file']) ? $input['file'] : '');
+        if ($path === '') {
+            return ['error' => 'Не понял, какая книга. Есть: '
+                . implode(', ', array_column($this->sheetSources(), 'name')) . '.'];
+        }
+
+        $meta = $this->sheetBookMeta($path);
+        if (isset($meta['error'])) return $meta;
+
+        $sheets = [];
+        foreach ($meta as $m) {
+            if ($m['rows'] <= 0) continue;
+            $sheets[] = [
+                'sheet'   => $m['name'],
+                'rows'    => $m['rows'],
+                'columns' => $m['letter'] !== '' ? 'A:' . $m['letter'] : '',
+            ];
+        }
+        return ['file' => basename($path), 'sheets' => $sheets,
+                'hint' => 'Дальше sheet_read (кусок листа, с буквами колонок) или sheet_find (поиск по листу).'];
+    }
+
+    /** sheet_read */
+    protected function toolSheetRead(array $input)
+    {
+        $path = $this->resolveSheetFile(isset($input['file']) ? $input['file'] : '');
+        if ($path === '') {
+            return ['error' => 'Не понял, какая книга. Есть: '
+                . implode(', ', array_column($this->sheetSources(), 'name')) . '.'];
+        }
+        $sheet = isset($input['sheet']) ? trim((string)$input['sheet']) : '';
+        if ($sheet === '') return ['error' => 'Не указан лист. Список - sheet_list.'];
+
+        $meta = $this->sheetBookMeta($path);
+        if (isset($meta['error'])) return $meta;
+        $known = null;
+        foreach ($meta as $m) {
+            if ($this->sameName($m['name'], $sheet)) { $known = $m; break; }
+        }
+        if (!$known) {
+            return ['error' => 'Такого листа нет. Есть: ' . implode(', ', array_column($meta, 'name')) . '.'];
+        }
+
+        $tsv = $this->sheetTsv($path, $known['name']);
+        if ($tsv === '') return ['error' => 'Не удалось разобрать лист «' . $known['name'] . '».'];
+
+        $from = isset($input['from_row']) ? max(1, (int)$input['from_row']) : 1;
+        $want = isset($input['rows']) ? (int)$input['rows'] : 30;
+        $want = max(1, min(200, $want));
+
+        list($colFrom, $colTo) = $this->columnRange(isset($input['columns']) ? $input['columns'] : '');
+
+        $lines = [];
+        $width = 0;
+        $fh = @fopen($tsv, 'r');
+        if (!$fh) return ['error' => 'Кэш листа недоступен.'];
+        while (($line = fgets($fh)) !== false) {
+            $line = rtrim($line, "\r\n");
+            if ($line === '') continue;
+            $cells = explode("\t", $line);
+            $rowNo = (int)array_shift($cells);
+            if ($rowNo < $from) continue;
+            if (count($lines) >= $want) break;
+
+            if ($colTo >= 0) $cells = array_slice($cells, $colFrom, $colTo - $colFrom + 1);
+            elseif ($colFrom > 0) $cells = array_slice($cells, $colFrom);
+
+            while ($cells && end($cells) === '') array_pop($cells);
+            $width = max($width, count($cells));
+            $lines[] = $rowNo . "\t" . implode("\t", $cells);
+        }
+        fclose($fh);
+
+        if (!$lines) return ['error' => 'Дальше строки ' . $from . ' на листе пусто.'];
+
+        $head = 'строка' . "\t" . implode("\t", $this->columnLetters($colFrom, $width));
+        $text = $head . "\n" . implode("\n", $lines);
+
+        return [
+            'file'  => basename($path),
+            'sheet' => $known['name'],
+            'rows_total' => $known['rows'],
+            'shown' => count($lines),
+            'text'  => $text,
+        ];
+    }
+
+    /** sheet_find */
+    protected function toolSheetFind(array $input)
+    {
+        $path = $this->resolveSheetFile(isset($input['file']) ? $input['file'] : '');
+        if ($path === '') {
+            return ['error' => 'Не понял, какая книга. Есть: '
+                . implode(', ', array_column($this->sheetSources(), 'name')) . '.'];
+        }
+        $query = isset($input['query']) ? trim((string)$input['query']) : '';
+        if ($query === '') return ['error' => 'Нечего искать.'];
+
+        $limit = isset($input['limit']) ? (int)$input['limit'] : 20;
+        $limit = max(1, min(100, $limit));
+
+        $meta = $this->sheetBookMeta($path);
+        if (isset($meta['error'])) return $meta;
+
+        $only = isset($input['sheet']) ? trim((string)$input['sheet']) : '';
+        $hits = [];
+        $scanned = [];
+
+        foreach ($meta as $m) {
+            if ($m['rows'] <= 0) continue;
+            if ($only !== '' && !$this->sameName($m['name'], $only)) continue;
+
+            $tsv = $this->sheetTsv($path, $m['name']);
+            if ($tsv === '') continue;
+            $scanned[] = $m['name'];
+
+            $fh = @fopen($tsv, 'r');
+            if (!$fh) continue;
+            while (($line = fgets($fh)) !== false) {
+                if (count($hits) >= $limit) break;
+                if (mb_stripos($line, $query, 0, 'UTF-8') === false) continue;
+
+                $cells = explode("\t", rtrim($line, "\r\n"));
+                $rowNo = (int)array_shift($cells);
+                $where = '';
+                foreach ($cells as $i => $v) {
+                    if (mb_stripos($v, $query, 0, 'UTF-8') !== false) {
+                        $where = $this->colLetter($i) . $rowNo;
+                        break;
+                    }
+                }
+                while ($cells && end($cells) === '') array_pop($cells);
+                $hits[] = [
+                    'sheet' => $m['name'],
+                    'cell'  => $where,
+                    'row'   => $rowNo,
+                    'text'  => mb_substr(implode(' | ', $cells), 0, 300, 'UTF-8'),
+                ];
+            }
+            fclose($fh);
+            if (count($hits) >= $limit) break;
+        }
+
+        return [
+            'file'    => basename($path),
+            'query'   => $query,
+            'sheets'  => $scanned,
+            'found'   => count($hits),
+            'matches' => $hits,
+            'hint'    => $hits ? 'Строку целиком бери sheet_read с from_row нужной строки.' : 'Ничего не нашлось.',
+        ];
+    }
+
+    /** Диапазон колонок вида «A:N» в индексы. [от, до], до = -1 значит все. */
+    protected function columnRange($spec)
+    {
+        $spec = strtoupper(trim((string)$spec));
+        if ($spec === '' || strpos($spec, ':') === false) return [0, -1];
+
+        list($a, $b) = explode(':', $spec, 2);
+        $a = preg_replace('~[^A-Z]~', '', $a);
+        $b = preg_replace('~[^A-Z]~', '', $b);
+        if ($a === '' || $b === '') return [0, -1];
+
+        $from = $this->colIndex($a);
+        $to   = $this->colIndex($b);
+        if ($to < $from) { $t = $from; $from = $to; $to = $t; }
+        return [$from, $to];
     }
 
     /* ------------------------------------------------------------------ *
