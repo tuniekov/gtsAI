@@ -55,7 +55,8 @@
 
 ### Что сделать: запустить один скрипт
 
-Скрипт [`_install/sql_readonly.sql`](_install/sql_readonly.sql). Сверху в нём три
+Скрипт [`core/components/gtsai/_install/sql_readonly.sql`](core/components/gtsai/_install/sql_readonly.sql)
+— он ставится вместе с пакетом, искать его на сайте по тому же пути. Сверху в нём три
 строки — имя базы, префикс таблиц и пароль, который вы придумываете. Всё три
 берутся из `core/config/config.inc.php` вашего сайта (`$database_name`,
 `$table_prefix`), кроме пароля.
@@ -69,7 +70,7 @@ SET @pass   = 'ПРИДУМАЙТЕ_ПАРОЛЬ';     -- пароль ново�
 Запустить от администратора MySQL:
 
 ```bash
-mysql -u root -p < _install/sql_readonly.sql
+mysql -u root -p < core/components/gtsai/_install/sql_readonly.sql
 ```
 
 или вставить целиком в phpMyAdmin → вкладка **SQL**.

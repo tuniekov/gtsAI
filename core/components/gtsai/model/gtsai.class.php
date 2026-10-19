@@ -110,6 +110,19 @@ class gtsAI
             return $this->error('Нужно войти на сайт.');
         }
 
+        // Всё, что меняет состояние, требует токен этой сессии.
+        //
+        // ⚠️ Одной авторизации мало: браузер приложит куки и к запросу с
+        // чужой страницы. Без проверки такая страница могла бы от имени
+        // вошедшего человека гонять чат (его деньги и дневной лимит), а при
+        // выключенном подтверждении - сразу править данные. Токен лежит в
+        // сессии, выдаётся вместе с настройками и приходит заголовком
+        // X-GTSAI-Token: прочитать его с чужого домена нельзя.
+        if (in_array($action, ['message', 'upload', 'apply', 'rollback'], true)) {
+            $deny = $this->checkCsrf($request);
+            if ($deny !== '') return $this->error($deny);
+        }
+
         switch ($action) {
             case 'echo':     return $this->actionEcho($request);
             case 'settings': return $this->actionSettings($request);
@@ -128,6 +141,91 @@ class gtsAI
     /* ------------------------------------------------------------------ *
      *  Настройки и доступ
      * ------------------------------------------------------------------ */
+
+    /**
+     * Запрещённая таблица в запросе. Пусто - запрет не сработал.
+     *
+     * ⚠️ Имя сверяем БЕЗ привязки к префиксу: в списке может стоять
+     * «modx_users», а на площадке префикс свой - и запрет молча переставал
+     * работать, оставляя таблицу пользователей открытой. Поэтому из записи
+     * убираем префикс этого сайта, а в запросе ищем имя с его префиксом или
+     * без. Границы слова обязательны: «users» не должно цеплять
+     * «gtsai_users».
+     */
+    protected function sqlDenied($query)
+    {
+        $deny = array_filter(array_map('trim', explode(',',
+            (string)$this->modx->getOption('gtsai_sql_deny', null, ''))));
+        if (!$deny) return '';
+
+        $prefix = (string)$this->modx->getOption('table_prefix');
+
+        foreach ($deny as $t) {
+            if ($t === '') continue;
+            // Снимаем префикс этого сайта, а заодно и «modx_»: со старых
+            // установок в настройке остались имена с ним, и на площадке с
+            // другим префиксом они бы никого не закрывали.
+            $bare = $t;
+            foreach ([$prefix, 'modx_'] as $pfx) {
+                if ($pfx !== '' && stripos($bare, $pfx) === 0) { $bare = substr($bare, strlen($pfx)); break; }
+            }
+            if ($bare === '') continue;
+
+            $re = '~(?<![a-z0-9_])'
+                . ($prefix !== '' ? '(?:' . preg_quote($prefix, '~') . ')?' : '')
+                . preg_quote($bare, '~')
+                . '(?![a-z0-9_])~i';
+            if (preg_match($re, $query)) return $t;
+        }
+        return '';
+    }
+
+    /**
+     * Токен этой сессии. Живёт рядом с сессией MODX, по одному на человека.
+     */
+    public function csrfToken()
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE) @session_start();
+
+        if (empty($_SESSION['gtsai_csrf'])) {
+            $_SESSION['gtsai_csrf'] = function_exists('random_bytes')
+                ? bin2hex(random_bytes(32))
+                : md5(uniqid('gtsai', true) . mt_rand());
+        }
+        return (string)$_SESSION['gtsai_csrf'];
+    }
+
+    /**
+     * Проверка токена у действий, меняющих состояние.
+     *
+     * Берём из заголовка (обычный путь виджета) или из тела - на случай
+     * формы. Сравниваем hash_equals, чтобы не подсказывать длиной ответа.
+     * Заодно смотрим Origin: если браузер его прислал, он должен совпадать
+     * с нашим хостом.
+     */
+    protected function checkCsrf(array $request)
+    {
+        $sent = '';
+        if (!empty($_SERVER['HTTP_X_GTSAI_TOKEN'])) $sent = (string)$_SERVER['HTTP_X_GTSAI_TOKEN'];
+        elseif (!empty($request['csrf']))           $sent = (string)$request['csrf'];
+
+        $real = $this->csrfToken();
+        if ($sent === '' || !hash_equals($real, $sent)) {
+            return 'Запрос не прошёл проверку: обновите страницу и повторите.';
+        }
+
+        $origin = '';
+        if (!empty($_SERVER['HTTP_ORIGIN'])) $origin = (string)$_SERVER['HTTP_ORIGIN'];
+        elseif (!empty($_SERVER['HTTP_REFERER'])) $origin = (string)$_SERVER['HTTP_REFERER'];
+        if ($origin !== '') {
+            $host = parse_url($origin, PHP_URL_HOST);
+            $mine = parse_url((string)$this->modx->getOption('site_url'), PHP_URL_HOST);
+            if ($host && $mine && strcasecmp($host, $mine) !== 0) {
+                return 'Запрос пришёл с чужой страницы.';
+            }
+        }
+        return '';
+    }
 
     /**
      * Загрузить настройку виджета по имени и проверить право текущего юзера.
@@ -191,6 +289,8 @@ class gtsAI
             'allow_write'   => (int)$this->setting['allow_write'],
             'confirm_write' => (int)$this->setting['confirm_write'],
             'confirm_lock'  => (int)$this->setting['confirm_lock'],
+            // Виджет приложит его к каждому запросу, который что-то меняет.
+            'csrf'          => $this->csrfToken(),
         ]]);
     }
 
@@ -783,12 +883,8 @@ class gtsAI
         }
 
         // Таблицы, которых не касаемся даже на чтение.
-        $deny = array_filter(array_map('trim', explode(',', (string)$this->modx->getOption('gtsai_sql_deny', null, ''))));
-        foreach ($deny as $t) {
-            if ($t !== '' && stripos($query, $t) !== false) {
-                return ['error' => 'К таблице ' . $t . ' обращаться нельзя.'];
-            }
-        }
+        $hit = $this->sqlDenied($query);
+        if ($hit !== '') return ['error' => 'К таблице ' . $hit . ' обращаться нельзя.'];
 
         $limit = isset($input['limit']) ? (int)$input['limit'] : 50;
         $limit = max(1, min($limit, 200));

@@ -54,9 +54,12 @@ export default {
         area: 'gtsai_sql',
     },
     // Таблицы, которые не показываем никогда, даже на чтение.
+    // Таблицы, закрытые даже на чтение. Имена пишутся БЕЗ префикса:
+    // префикс у каждой площадки свой, а с зашитым «modx_» запрет на чужом
+    // префиксе молча переставал работать.
     'sql_deny': {
         xtype: 'textfield',
-        value: 'modx_users,modx_user_attributes,gtsapi_tokens',
+        value: 'users,user_attributes,gtsapi_tokens',
         area: 'gtsai_sql',
     },
 
