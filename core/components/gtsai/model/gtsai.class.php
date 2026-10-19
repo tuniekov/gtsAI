@@ -1489,10 +1489,13 @@ class gtsAI
         }
         $path = rtrim(str_replace('\\', '/', $path), '/') . '/';
 
-        if (!is_dir($path)) {
-            @mkdir($path, 0775, true);
-            $this->moveOldFiles($path);
-        }
+        if (!is_dir($path)) @mkdir($path, 0775, true);
+
+        // Проверки дешёвые (один is_dir и один is_file), а делать их надо на
+        // каждом обращении: каталог мог появиться не от нас - например, его
+        // создала установка пакета.
+        $this->moveOldFiles($path);
+        $this->cleanOrphans($path);
         return $path;
     }
 
@@ -1518,6 +1521,46 @@ class gtsAI
         if ($moved) {
             $this->modx->log(modX::LOG_LEVEL_INFO,
                 '[gtsAI] вложения чата перенесены в ' . $to . ', файлов: ' . $moved);
+        }
+    }
+
+    /**
+     * Разовая уборка файлов, которых нет в базе.
+     *
+     * ⚠️ Так лечится собственная оплошность: пакет собирается из каталога
+     * компонента на РАБОЧЕМ сайте, и вместе с кодом в него попали вложения
+     * чатов с дева - на прод приехала чужая переписка в виде файлов. Сборка
+     * их больше не берёт (config.exclude), а то, что уже доехало, убираем
+     * здесь: в хранилище имеют право лежать только файлы, у которых есть
+     * запись. Молодые файлы не трогаем - между записью файла и строкой в
+     * базе есть мгновение.
+     */
+    protected function cleanOrphans($dir)
+    {
+        $mark = $dir . '.orphans-cleaned';
+        if ($dir === '' || is_file($mark)) return;
+
+        $known = [];
+        $table = $this->modx->getTableName('gtsAIFile');
+        if ($table) {
+            $st = $this->modx->query("SELECT path FROM {$table}");
+            if ($st) foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $name) $known[(string)$name] = true;
+        }
+
+        $killed = 0;
+        $edge = time() - 86400;
+        foreach ((array)@scandir($dir) as $name) {
+            if ($name === '.' || $name === '..' || $name[0] === '.') continue;
+            $full = $dir . $name;
+            if (!is_file($full) || isset($known[$name])) continue;
+            if (@filemtime($full) > $edge) continue;
+            if (@unlink($full)) $killed++;
+        }
+
+        @file_put_contents($mark, date('Y-m-d H:i:s') . ", удалено без записи: " . $killed . "\n");
+        if ($killed) {
+            $this->modx->log(modX::LOG_LEVEL_INFO,
+                '[gtsAI] из хранилища убраны файлы без записи в базе: ' . $killed);
         }
     }
 
