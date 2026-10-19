@@ -1473,9 +1473,80 @@ class gtsAI
      */
     protected function filesPath()
     {
-        $path = MODX_CORE_PATH . 'gtsai_files/';
-        if (!is_dir($path)) @mkdir($path, 0775, true);
+        // Хранилище вложений чата. По умолчанию - внутри каталога компонента:
+        // файлы пакета должны лежать в core/components/gtsai/ и
+        // assets/components/gtsai/, а не россыпью по core/. Настройкой можно
+        // увести куда угодно - например, на отдельный диск.
+        //
+        // ⚠️ Каталог нарочно под core/: туда нет доступа из веба (MODX
+        // закрывает core/ своим .htaccess), а файлы выдаёт шлюз по правам.
+        // Если уводите настройкой - уводите тоже за пределы веб-корня.
+        $path = trim((string)$this->modx->getOption('gtsai_files_path'));
+        if ($path === '') {
+            $path = MODX_CORE_PATH . 'components/gtsai/files/';
+        } elseif (!preg_match('~^([a-z]:)?[/\\\\]~i', $path)) {
+            $path = MODX_BASE_PATH . ltrim($path, '/\\');
+        }
+        $path = rtrim(str_replace('\\', '/', $path), '/') . '/';
+
+        if (!is_dir($path)) {
+            @mkdir($path, 0775, true);
+            $this->moveOldFiles($path);
+        }
         return $path;
+    }
+
+    /**
+     * Переезд из старого core/gtsai_files/.
+     *
+     * Срабатывает один раз - когда нового каталога ещё нет. В базе у файла
+     * хранится только имя, поэтому перенести достаточно сами файлы: ссылки
+     * на скачивание и история остаются рабочими.
+     */
+    protected function moveOldFiles($to)
+    {
+        $from = MODX_CORE_PATH . 'gtsai_files/';
+        if (!is_dir($from) || rtrim($from, '/') === rtrim($to, '/')) return;
+
+        $moved = 0;
+        foreach ((array)@scandir($from) as $name) {
+            if ($name === '.' || $name === '..') continue;
+            if (!is_file($from . $name)) continue;
+            if (@rename($from . $name, $to . $name)) $moved++;
+        }
+        @rmdir($from);
+        if ($moved) {
+            $this->modx->log(modX::LOG_LEVEL_INFO,
+                '[gtsAI] вложения чата перенесены в ' . $to . ', файлов: ' . $moved);
+        }
+    }
+
+    /**
+     * Каталог кэша компонента. Там же, где и остальное хозяйство пакета:
+     * разобранные листы книг и текст правил-файлов.
+     */
+    protected function cachePath($sub)
+    {
+        $path = MODX_CORE_PATH . 'components/gtsai/cache/' . trim($sub, '/') . '/';
+        if (!is_dir($path)) {
+            @mkdir($path, 0775, true);
+            // Прежний кэш лежал в core/cache/gtsai_*. Переносить нечего -
+            // это кэш, он пересоберётся; просто убираем за собой.
+            $this->dropDir(MODX_CORE_PATH . 'cache/gtsai_' . trim($sub, '/') . '/');
+        }
+        return is_dir($path) ? $path : '';
+    }
+
+    /** Снести каталог с содержимым. Только для кэша: данных там нет. */
+    protected function dropDir($dir)
+    {
+        if (!is_dir($dir)) return;
+        foreach ((array)@scandir($dir) as $name) {
+            if ($name === '.' || $name === '..') continue;
+            $full = $dir . $name;
+            is_dir($full) ? $this->dropDir($full . '/') : @unlink($full);
+        }
+        @rmdir($dir);
     }
 
     /**
@@ -2295,7 +2366,8 @@ class gtsAI
     {
         $mtime = @filemtime($file);
         if (!$mtime) return '';
-        return MODX_CORE_PATH . 'cache/gtsai_rules/' . md5($file) . '-' . $mtime . '.txt';
+        $dir = $this->cachePath('rules');
+        return $dir === '' ? '' : $dir . md5($file) . '-' . $mtime . '.txt';
     }
 
     /** Имя правила для сравнения: без краёв, без лишних пробелов, в нижнем регистре. */
@@ -2421,7 +2493,9 @@ class gtsAI
     {
         $mtime = @filemtime($path);
         if (!$mtime) return '';
-        $dir = MODX_CORE_PATH . 'cache/gtsai_sheets/' . md5($path) . '-' . $mtime . '/';
+        $base = $this->cachePath('sheets');
+        if ($base === '') return '';
+        $dir = $base . md5($path) . '-' . $mtime . '/';
         if (!is_dir($dir)) @mkdir($dir, 0775, true);
         return is_dir($dir) ? $dir : '';
     }
