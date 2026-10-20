@@ -537,8 +537,12 @@ class gtsAI
             'name'         => 'save_file',
             'description'  =>
                 'Сохранить файл и дать пользователю ссылку на скачивание.' . "\n" .
-                'format: xlsx - таблица (передай rows: массив строк, каждая строка - массив значений; первая строка обычно заголовки), md/txt/csv - текст (передай text).' . "\n" .
-                'Для разбора заявки собирай xlsx: заголовки первой строкой, дальше данные.',
+                'format: md/txt/csv - текст (передай text); xlsx - таблица.' . "\n" .
+                'Для xlsx место задавай АДРЕСОМ, пустые ячейки считать не нужно:' . "\n" .
+                '  rows + at - блок строк, at это адрес левой верхней ячейки (по умолчанию A1);' . "\n" .
+                '  blocks - несколько блоков сразу: [{"at":"A15","rows":[[…]]},{"at":"BT15","rows":[[…]]}];' . "\n" .
+                '  cells - отдельные значения: {"B2":"…","BU15":"…"}.' . "\n" .
+                'Внутри строки значения идут подряд, поэтому вести отсчёт от A и набивать пустые ячейки не надо - укажи адрес нужной колонки.',
             'input_schema' => [
                 'type'       => 'object',
                 'properties' => [
@@ -549,6 +553,16 @@ class gtsAI
                         'type'        => 'array',
                         'items'       => ['type' => 'array', 'items' => ['type' => 'string']],
                         'description' => 'Строки таблицы для xlsx',
+                    ],
+                    'at'     => ['type' => 'string', 'description' => 'Адрес левой верхней ячейки для rows, например A15. По умолчанию A1'],
+                    'blocks' => [
+                        'type'        => 'array',
+                        'items'       => ['type' => 'object'],
+                        'description' => 'Несколько блоков: каждый {"at":"BT15","rows":[[…]]}',
+                    ],
+                    'cells'  => [
+                        'type'        => 'object',
+                        'description' => 'Отдельные ячейки по адресам: {"B2":"значение"}',
                     ],
                     'sheet'  => ['type' => 'string', 'description' => 'Имя листа для xlsx, по умолчанию «вставка»'],
                 ],
@@ -670,9 +684,7 @@ class gtsAI
         $full   = $this->filesPath() . $stored;
 
         if ($format === 'xlsx') {
-            $rows = isset($input['rows']) && is_array($input['rows']) ? $input['rows'] : [];
-            if (!$rows) return ['error' => 'Для xlsx нужны rows - строки таблицы.'];
-            $err = $this->writeSheet($full, $rows, isset($input['sheet']) ? (string)$input['sheet'] : '');
+            $err = $this->writeSheet($full, $input);
             if ($err !== '') return ['error' => $err];
         } else {
             $text = isset($input['text']) ? (string)$input['text'] : '';
@@ -733,42 +745,104 @@ class gtsAI
     }
 
     /** Запись таблицы в xlsx. Библиотека PHPExcel уже есть в системе. */
-    protected function writeSheet($full, array $rows, $sheetName = '')
+    protected function writeSheet($full, array $input)
     {
         $path = gtsAPI::phpExcelPath($this->modx);
         if (!$path) return 'На сайте нет библиотеки PHPExcel - xlsx собрать нечем.';
         require_once $path . 'PHPExcel.php';
 
-        if (count($rows) > 5000) return 'Больше 5000 строк за раз нельзя.';
+        // ⚠️ Куда писать - задаётся АДРЕСОМ, а не числом пустых ячеек.
+        //
+        // Раньше строка была просто списком значений по порядку, и чтобы
+        // попасть в BT, модель должна была поставить перед значением ровно
+        // 71 пустую ячейку. Считать их руками - заведомая ошибка: на разборе
+        // заявки счёт разъехался на две, весь круглый блок уехал вправо и
+        // наименование оказалось в BW вместо BU. Теперь блок получает адрес
+        // своего левого верхнего угла, а отдельные значения - адрес ячейки.
+        $blocks = [];
+        if (isset($input['blocks']) && is_array($input['blocks'])) {
+            foreach ($input['blocks'] as $b) {
+                if (!is_array($b) || empty($b['rows']) || !is_array($b['rows'])) continue;
+                $blocks[] = [
+                    'at'   => isset($b['at']) ? (string)$b['at'] : (isset($b['start']) ? (string)$b['start'] : 'A1'),
+                    'rows' => $b['rows'],
+                ];
+            }
+        }
+        if (isset($input['rows']) && is_array($input['rows']) && $input['rows']) {
+            $blocks[] = [
+                'at'   => isset($input['at']) ? (string)$input['at'] : 'A1',
+                'rows' => $input['rows'],
+            ];
+        }
+
+        $cells = isset($input['cells']) && is_array($input['cells']) ? $input['cells'] : [];
+        if (!$blocks && !$cells) return 'Нечего писать: нужны rows, blocks или cells.';
+
+        $total = 0;
+        foreach ($blocks as $b) $total += count($b['rows']);
+        if ($total > 5000) return 'Больше 5000 строк за раз нельзя.';
 
         try {
             $book = new PHPExcel();
             $sheet = $book->getActiveSheet();
-            $sheet->setTitle($sheetName !== '' ? mb_substr($sheetName, 0, 31) : 'вставка');
+            $name = isset($input['sheet']) ? (string)$input['sheet'] : '';
+            $sheet->setTitle($name !== '' ? mb_substr($name, 0, 31) : 'вставка');
 
-            $r = 1;
-            foreach ($rows as $row) {
-                if (!is_array($row)) continue;
-                $c = 0;
-                foreach ($row as $v) {
-                    $v = (string)$v;
-                    if ($this->looksNumeric($v)) {
-                        // Числом, а не текстом: этот файл вставляют в расчётную
-                        // форму, и текстовые «300» или «0,7» там не посчитаются.
-                        $sheet->setCellValueByColumnAndRow($c, $r, (float)str_replace([' ', ','], ['', '.'], $v));
-                    } else {
-                        $sheet->setCellValueExplicitByColumnAndRow($c, $r, $v, PHPExcel_Cell_DataType::TYPE_STRING);
+            foreach ($blocks as $b) {
+                list($col0, $row0) = $this->cellAddress($b['at']);
+                if ($col0 === null) return 'Не понял адрес «' . $b['at'] . '»: нужно вида A15 или BT15.';
+
+                $r = $row0;
+                foreach ($b['rows'] as $row) {
+                    if (!is_array($row)) continue;
+                    $c = $col0;
+                    foreach ($row as $v) {
+                        $this->putCell($sheet, $c, $r, $v);
+                        $c++;
                     }
-                    $c++;
+                    $r++;
                 }
-                $r++;
             }
+
+            foreach ($cells as $addr => $v) {
+                list($c, $r) = $this->cellAddress($addr);
+                if ($c === null) return 'Не понял адрес ячейки «' . $addr . '».';
+                $this->putCell($sheet, $c, $r, $v);
+            }
+
             $writer = PHPExcel_IOFactory::createWriter($book, 'Excel2007');
             $writer->save($full);
         } catch (\Throwable $e) {
             return 'Не удалось собрать xlsx: ' . $e->getMessage();
         }
         return '';
+    }
+
+    /** Адрес вида BT15 в пару [номер колонки с нуля, номер строки]. */
+    protected function cellAddress($addr)
+    {
+        if (!preg_match('~^\s*([A-Za-z]{1,3})\s*(\d{1,7})\s*$~', (string)$addr, $m)) return [null, null];
+        $row = (int)$m[2];
+        if ($row < 1) return [null, null];
+        return [$this->colIndex($m[1]), $row];
+    }
+
+    /**
+     * Запись одного значения. Числа кладём числами: файл вставляют в
+     * расчётную форму, а текстовые «300» или «0,7» там не посчитаются.
+     */
+    protected function putCell($sheet, $col, $row, $v)
+    {
+        if ($v === null) return;
+        $v = (string)$v;
+        if ($v === '') return;
+
+        if ($this->looksNumeric($v)) {
+            $sheet->setCellValueByColumnAndRow($col, $row, (float)str_replace([' ', ','], ['', '.'], $v));
+        } else {
+            $sheet->setCellValueExplicitByColumnAndRow($col, $row, $v, PHPExcel_Cell_DataType::TYPE_STRING);
+        }
     }
 
     /**
